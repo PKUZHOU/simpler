@@ -56,6 +56,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from base_runner import BaseRunner
+
 logger = logging.getLogger(__name__)
 
 
@@ -418,16 +420,13 @@ def _temporary_env(env_updates: Dict[str, str]):
                 os.environ[k] = prev
 
 
-class CodeRunner:
+class CodeRunner(BaseRunner):
     """
     Simplified test runner that loads kernel config and golden script.
 
-    This class automates:
-    - Loading kernel_config.py and golden.py dynamically
-    - Building func_args automatically from torch tensors
-    - Converting numpy arrays to torch tensors
-    - Separating inputs and outputs based on naming convention
-    - Running the full test flow
+    Inherits config loading, compilation, and comparison from BaseRunner.
+    Adds in-process execution via ctypes bindings, torch-based verification,
+    profiling, and multi-case support.
 
     Args:
         kernels_dir: Path to kernels directory containing kernel_config.py
@@ -450,30 +449,30 @@ class CodeRunner:
         repeat_rounds: Optional[int] = None,
         clone_protocol: str = "ssh",
     ):
-        # Setup logging if not already configured (e.g., when used directly, not via run_example.py)
-        _setup_logging_if_needed()
+        super().__init__(kernels_dir, golden_path, platform, build_dir)
 
-        self.kernels_dir = Path(kernels_dir).resolve()
         self.golden_path = Path(golden_path).resolve()
-        self.platform = platform
         self.enable_profiling = enable_profiling
-        self.project_root = _get_project_root()
-
-        # Resolve device ID
         self.device_id = device_id if device_id is not None else 0
         self.pto_isa_commit = pto_isa_commit
         self.clone_protocol = clone_protocol
-        self.build_dir = build_dir
 
-        # Load configurations
-        self._kernel_config = self._load_kernel_config()
-        self._golden_module = self._load_golden_module()
+        if self._golden_module is None:
+            raise FileNotFoundError(f"Golden script not found: {self.golden_path}")
+        if not hasattr(self._golden_module, 'generate_inputs'):
+            raise AttributeError(
+                f"golden.py must define generate_inputs(params) function\n"
+                f"File: {self.golden_path}"
+            )
+        if not hasattr(self._golden_module, 'compute_golden'):
+            raise AttributeError(
+                f"golden.py must define compute_golden(tensors, params) function\n"
+                f"File: {self.golden_path}"
+            )
 
-        # Extract kernel configuration
         self.kernels = self._kernel_config.KERNELS
         self.orchestration = self._kernel_config.ORCHESTRATION
 
-        # Extract golden configuration — determine which cases to run
         all_cases = getattr(self._golden_module, 'ALL_CASES', {"Default": {}})
         default_case = getattr(self._golden_module, 'DEFAULT_CASE', "Default")
 
@@ -492,23 +491,8 @@ class CodeRunner:
         self.output_names = getattr(self._golden_module, '__outputs__', None)
         self.tensor_order = getattr(self._golden_module, 'TENSOR_ORDER', None)
 
-        # Runtime configuration - read from kernel_config or use defaults
         runtime_config = getattr(self._kernel_config, 'RUNTIME_CONFIG', {})
-        self.aicpu_thread_num = runtime_config.get('aicpu_thread_num', 3)
-        self.orch_thread_num = runtime_config.get('orch_thread_num', 1)
-        self.block_dim = runtime_config.get('block_dim', 24)
-        self.runtime_name = runtime_config.get('runtime', 'host_build_graph')
         self.repeat_rounds = repeat_rounds if repeat_rounds is not None else runtime_config.get('rounds', 1)
-
-    def _load_kernel_config(self):
-        """Load kernel_config.py from kernels directory."""
-        config_path = self.kernels_dir / "kernel_config.py"
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"kernel_config.py not found in {self.kernels_dir}\n"
-                f"Expected: {config_path}"
-            )
-        return _load_module_from_path(config_path, f"kernel_config_{id(self)}")
 
     def _load_golden_module(self):
         """Load golden.py script."""

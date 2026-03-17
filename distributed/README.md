@@ -1,28 +1,32 @@
 # simpler 分布式扩展 (Distributed Extension)
 
-在昇腾 NPU 多卡环境下，通过 HCCL 建立 RDMA 通信上下文，利用 simpler 的三种构图 runtime 执行 PTO 集合通信 kernel。
+利用 simpler 的三种构图 runtime 执行 PTO 集合通信 kernel，支持真机（onboard）和仿真（sim）两种平台。
 
 ## 架构
 
 ```
-run_distributed_example.py  (CLI 入口)
+run_example.py --distributed   (统一 CLI 入口，自动检测 DISTRIBUTED_CONFIG)
     │
     ▼
-DistributedRunner           (Python 编排层)
-    ├── compile()           调用 simpler 的 RuntimeBuilder + KernelCompiler
-    ├── prepare_data()      从 golden.py 生成 per-rank 输入 .bin 文件
-    ├── build_worker()      cmake + make distributed_worker
-    ├── run()               并行启动 N 个 distributed_worker 进程
-    └── verify()            对比 root rank 输出与 golden
+DistributedRunner(BaseRunner)   (Python 编排层，继承 BaseRunner 共享编译/验证)
+    ├── compile()               调用 BaseRunner.compile_artifacts()
+    ├── prepare_data()          从 golden.py 生成 per-rank 输入 .bin 文件
+    ├── build_worker()          cmake -DDISTRIBUTED_PLATFORM=onboard|sim
+    ├── run()                   并行启动 N 个 distributed_worker 进程
+    └── verify()                对比 root rank 输出与 golden
          │
          ▼  (per-rank process)
-distributed_worker          (C++ 通用 worker)
-    ├── ACL/HCCL 初始化
-    ├── RootInfo 文件交换
-    ├── HcclAllocComResourceByTiling → windowsIn[] GVA 地址
+distributed_worker              (C++ 通用 worker，使用 PlatformBackend 接口)
+    ├── PlatformBackend::init() / set_device()
+    ├── PlatformBackend::comm_init()   (RootInfo 交换)
+    ├── PlatformBackend::comm_alloc_resources()   (windowsIn[] 地址)
     ├── dlopen libhost_runtime.so (simpler)
-    ├── set_device → init_runtime → launch_runtime → finalize_runtime
-    └── 数据 load/save (来自 CLI --load/--save)
+    ├── init_runtime → launch_runtime → finalize_runtime
+    └── 数据 load/save + PlatformBackend::cleanup()
+
+PlatformBackend 接口
+    ├── OnboardBackend  — ACL/HCCL 真机 (GVA 地址)
+    └── SimBackend      — POSIX shm 共享内存仿真 (无 CANN 依赖)
 ```
 
 ## 支持的 Runtime
@@ -33,30 +37,42 @@ distributed_worker          (C++ 通用 worker)
 | `aicpu_build_graph` | AICPU 侧 | 0 | 4 | AICPU 构图 + 调度，需 `PTO_AICPU_BUILD_GRAPH_BUILD_MODE=1` |
 | `tensormap_and_ringbuffer` | AICPU 侧 (PTO2) | 1 | 3 | 设备端编排，1 编排器 + 3 调度器，block_dim 须被 3 整除 |
 
-## 与 simpler 现有代码的关系
+## 与 simpler 现有架构的融合
 
-**零侵入**：`src/`、`python/`、`examples/scripts/` 不做任何修改。
+DistributedRunner 和 CodeRunner 共同继承 `BaseRunner`（`python/base_runner.py`），共享编译、配置加载和验证逻辑。
 
-| 层 | simpler 现有 | distributed 新增 | 交互方式 |
+| 层 | simpler 现有 | distributed 扩展 | 交互方式 |
 |----|-------------|-----------------|---------|
-| 编译 | RuntimeBuilder, KernelCompiler | DistributedRunner.compile() | import 复用 |
+| Runner 基类 | BaseRunner | DistributedRunner(BaseRunner) | 继承 |
+| 编译 | RuntimeBuilder, KernelCompiler | BaseRunner.compile_artifacts() | 共享 |
+| 运行时环境 | RUNTIME_ENV (CodeRunner) | --env KEY=VALUE (worker) | 传递 |
 | C API | libhost_runtime.so | distributed_worker (dlopen) | dlopen + dlsym |
+| 平台 | a2a3 / a2a3sim | PlatformBackend (onboard / sim) | 条件编译 |
 | Kernel | kernel_entry 签名 + PTO 指令 | treduce_kernel.cpp | 完全兼容 |
-| 示例约定 | kernel_config.py + golden.py | 扩展 DISTRIBUTED_CONFIG + RUNTIME_CONFIG | 向后兼容 |
+| CLI | run_example.py | run_example.py --distributed (自动检测) | 统一入口 |
 
 ## 目录结构
 
 ```
 distributed/
 ├── README.md                 本文件
-├── CMakeLists.txt            构建 distributed_worker
+├── CMakeLists.txt            构建 distributed_worker (DISTRIBUTED_PLATFORM=onboard|sim)
 ├── include/
-│   └── hccl_context.h        HcclDeviceContext 结构定义
+│   ├── hccl_context.h        HcclDeviceContext 结构定义
+│   └── platform_backend.h    PlatformBackend 抽象接口
 ├── src/
-│   └── distributed_worker.cpp  per-device C++ 通用 worker
+│   ├── distributed_worker.cpp  per-device C++ 通用 worker
+│   ├── onboard_backend.cpp     ACL/HCCL 真机实现
+│   └── sim_backend.cpp         POSIX shm 仿真实现
+├── tests/
+│   └── test_sim_e2e.sh         Sim 模式 E2E 测试脚本
 └── python/
-    ├── distributed_runner.py   DistributedRunner 类
-    └── run_distributed_example.py  CLI 入口
+    ├── distributed_runner.py   backward-compat redirect → python/distributed_runner.py
+    └── run_distributed_example.py  CLI (也可用 run_example.py --distributed)
+
+python/
+├── base_runner.py              BaseRunner 基类 (CodeRunner/DistributedRunner 共享)
+└── distributed_runner.py       DistributedRunner 类 (新位置)
 
 examples/a2a3/<runtime>/treduce_distributed/
 ├── golden.py                 分布式 golden (generate + verify)

@@ -108,8 +108,8 @@ Golden.py interface:
 
     parser.add_argument(
         "-g", "--golden",
-        required=True,
-        help="Path to golden.py script"
+        default=None,
+        help="Path to golden.py script (auto-detected if omitted)"
     )
 
     parser.add_argument(
@@ -192,6 +192,25 @@ Golden.py interface:
         help="Git protocol for cloning pto-isa (default: ssh)"
     )
 
+    parser.add_argument(
+        "--distributed",
+        action="store_true",
+        help="Force distributed mode (auto-detected from DISTRIBUTED_CONFIG if omitted)"
+    )
+
+    parser.add_argument(
+        "--nranks",
+        type=int,
+        default=None,
+        help="Number of ranks for distributed mode (default: from kernel_config)"
+    )
+
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip golden verification (distributed mode)"
+    )
+
     args = parser.parse_args()
 
     if args.all and args.case:
@@ -229,14 +248,9 @@ Golden.py interface:
 
     # Validate paths
     kernels_path = Path(args.kernels)
-    golden_path = Path(args.golden)
 
     if not kernels_path.exists():
         logger.error(f"Kernels directory not found: {kernels_path}")
-        return 1
-
-    if not golden_path.exists():
-        logger.error(f"Golden script not found: {golden_path}")
         return 1
 
     kernel_config_path = kernels_path / "kernel_config.py"
@@ -244,80 +258,31 @@ Golden.py interface:
         logger.error(f"kernel_config.py not found in {kernels_path}")
         return 1
 
-    # Import and run
+    # Auto-detect golden.py if not specified
+    golden_path_str = args.golden
+    if golden_path_str is None:
+        candidate = kernels_path.resolve().parent / "golden.py"
+        if candidate.exists():
+            golden_path_str = str(candidate)
+            logger.info(f"Auto-detected golden: {golden_path_str}")
+
+    # Auto-detect distributed mode from kernel_config
+    is_distributed = args.distributed
+    if not is_distributed:
+        from base_runner import load_module_from_path
+        try:
+            kcfg = load_module_from_path(kernel_config_path, "_detect_kcfg")
+            if hasattr(kcfg, "DISTRIBUTED_CONFIG"):
+                is_distributed = True
+                logger.info("Auto-detected DISTRIBUTED_CONFIG — using distributed mode")
+        except Exception:
+            pass
+
     try:
-        from code_runner import create_code_runner
-
-        runner = create_code_runner(
-            kernels_dir=str(args.kernels),
-            golden_path=str(args.golden),
-            device_id=args.device,
-            platform=args.platform,
-            enable_profiling=args.enable_profiling,
-            run_all_cases=args.all,
-            case_name=args.case,
-            pto_isa_commit=args.pto_isa_commit,
-            build_dir=args.savetemp,
-            repeat_rounds=args.rounds,
-            clone_protocol=args.clone_protocol,
-        )
-
-        # Snapshot existing device logs before the run so we can identify the
-        # new log created by this run (CANN writes device logs asynchronously).
-        pre_run_device_logs = set()
-        device_log_dir = None
-        if args.enable_profiling and args.platform == "a2a3":
-            device_log_dir = _get_device_log_dir(args.device)
-            if device_log_dir.exists():
-                pre_run_device_logs = set(device_log_dir.glob("*.log"))
-
-        runner.run()
-        logger.info("=" * 60)
-        logger.info("TEST PASSED")
-        logger.info("=" * 60)
-
-        # If profiling was enabled, generate merged swimlane JSON
-        if args.enable_profiling:
-            logger.info("Generating swimlane visualization...")
-            kernel_config_path = kernels_path / "kernel_config.py"
-            swimlane_script = project_root / "tools" / "swimlane_converter.py"
-
-            if swimlane_script.exists():
-                import subprocess
-                try:
-                    cmd = [
-                        sys.executable,
-                        str(swimlane_script),
-                        "-k",
-                        str(kernel_config_path),
-                    ]
-
-                    # Find the device log created by this run via snapshot diff
-                    if device_log_dir is not None:
-                        device_log_file = _wait_for_new_device_log(
-                            device_log_dir, pre_run_device_logs)
-                        if device_log_file:
-                            cmd += ["--device-log", str(device_log_file)]
-                        else:
-                            logger.warning("No new device log found, falling back to device-id")
-                            cmd += ["-d", str(args.device)]
-                    else:
-                        cmd += ["-d", str(args.device)]
-
-                    if log_level_str == "debug":
-                        cmd.append("-v")
-
-                    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                    logger.info(result.stdout)
-                    logger.info("Swimlane JSON generation completed")
-                except subprocess.CalledProcessError as e:
-                    logger.warning(f"Failed to generate swimlane JSON: {e}")
-                    if log_level_str == "debug":
-                        logger.debug(f"stderr: {e.stderr}")
-            else:
-                logger.warning(f"Swimlane converter script not found: {swimlane_script}")
-
-        return 0
+        if is_distributed:
+            return _run_distributed(args, kernels_path, golden_path_str, log_level_str)
+        else:
+            return _run_single(args, kernels_path, golden_path_str, log_level_str)
 
     except ImportError as e:
         logger.error(f"Import error: {e}")
@@ -330,6 +295,101 @@ Golden.py interface:
             import traceback
             traceback.print_exc()
         return 1
+
+
+def _run_distributed(args, kernels_path, golden_path_str, log_level_str):
+    """Run in distributed (multi-card) mode via DistributedRunner."""
+    from distributed_runner import DistributedRunner
+
+    runner = DistributedRunner(
+        kernels_dir=str(kernels_path),
+        golden_path=golden_path_str,
+        platform=args.platform,
+        nranks=args.nranks,
+        build_dir=args.savetemp,
+    )
+
+    runner.compile()
+    if golden_path_str:
+        runner.prepare_data()
+    runner.build_worker()
+    success = runner.run()
+
+    if success and golden_path_str and not args.skip_verify:
+        success = runner.verify()
+
+    if success:
+        logger.info("=" * 60)
+        logger.info("DISTRIBUTED TEST PASSED")
+        logger.info("=" * 60)
+        return 0
+    else:
+        logger.error("DISTRIBUTED TEST FAILED")
+        return 1
+
+
+def _run_single(args, kernels_path, golden_path_str, log_level_str):
+    """Run in single-card mode via CodeRunner."""
+    if not golden_path_str or not Path(golden_path_str).exists():
+        logger.error(f"Golden script not found: {golden_path_str}")
+        return 1
+
+    from code_runner import create_code_runner
+
+    runner = create_code_runner(
+        kernels_dir=str(kernels_path),
+        golden_path=str(golden_path_str),
+        device_id=args.device,
+        platform=args.platform,
+        enable_profiling=args.enable_profiling,
+        run_all_cases=args.all,
+        case_name=args.case,
+        pto_isa_commit=args.pto_isa_commit,
+        build_dir=args.savetemp,
+        repeat_rounds=args.rounds,
+        clone_protocol=args.clone_protocol,
+    )
+
+    pre_run_device_logs = set()
+    device_log_dir = None
+    if args.enable_profiling and args.platform == "a2a3":
+        device_log_dir = _get_device_log_dir(args.device)
+        if device_log_dir.exists():
+            pre_run_device_logs = set(device_log_dir.glob("*.log"))
+
+    runner.run()
+    logger.info("=" * 60)
+    logger.info("TEST PASSED")
+    logger.info("=" * 60)
+
+    if args.enable_profiling:
+        logger.info("Generating swimlane visualization...")
+        kc_path = kernels_path / "kernel_config.py"
+        swimlane_script = project_root / "tools" / "swimlane_converter.py"
+
+        if swimlane_script.exists():
+            import subprocess
+            try:
+                cmd = [sys.executable, str(swimlane_script), "-k", str(kc_path)]
+                if device_log_dir is not None:
+                    device_log_file = _wait_for_new_device_log(
+                        device_log_dir, pre_run_device_logs)
+                    if device_log_file:
+                        cmd += ["--device-log", str(device_log_file)]
+                    else:
+                        cmd += ["-d", str(args.device)]
+                else:
+                    cmd += ["-d", str(args.device)]
+                if log_level_str == "debug":
+                    cmd.append("-v")
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                logger.info(result.stdout)
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Failed to generate swimlane JSON: {e}")
+        else:
+            logger.warning(f"Swimlane converter not found: {swimlane_script}")
+
+    return 0
 
 
 if __name__ == "__main__":
