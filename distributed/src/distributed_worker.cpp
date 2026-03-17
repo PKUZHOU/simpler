@@ -17,38 +17,35 @@
  *   4 — simpler runtime error
  */
 
+#include <dlfcn.h>
+
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <string>
 #include <thread>
-#include <chrono>
 #include <vector>
 
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
-
 #include "hccl_context.h"
 
 // Internal HCCL APIs (not in public headers)
-extern "C" HcclResult HcclAllocComResourceByTiling(
-    HcclComm comm, void *stream, void *mc2Tiling, void **commContext);
-extern "C" HcclResult HcomGetCommHandleByGroup(
-    const char *group, HcclComm *commHandle);
+extern "C" HcclResult HcclAllocComResourceByTiling(HcclComm comm, void* stream, void* mc2Tiling, void** commContext);
+extern "C" HcclResult HcomGetCommHandleByGroup(const char* group, HcclComm* commHandle);
 
 using CommTopo = uint32_t;
-extern "C" HcclResult HcomGetL0TopoTypeEx(
-    const char *group, CommTopo *topoType, uint32_t isSetDevice);
+extern "C" HcclResult HcomGetL0TopoTypeEx(const char* group, CommTopo* topoType, uint32_t isSetDevice);
 static constexpr uint32_t COMM_IS_NOT_SET_DEVICE = 0;
 static constexpr uint32_t COMM_TOPO_MESH = 0b1u;
 
-using rtStream_t = void *;
+using rtStream_t = void*;
 static constexpr int32_t RT_STREAM_PRIORITY_DEFAULT = 0;
-extern "C" int32_t rtStreamCreate(rtStream_t *stream, int32_t priority);
+extern "C" int32_t rtStreamCreate(rtStream_t* stream, int32_t priority);
 extern "C" int32_t rtStreamDestroy(rtStream_t stream);
 
 // ============================================================================
@@ -232,7 +229,7 @@ struct HcclOpResParam {
     RemoteResPtr remoteRes[1];
 };
 
-} // namespace hccl_compat
+}  // namespace hccl_compat
 
 // ============================================================================
 // Generic buffer descriptor (parsed from CLI --win-buffer / --dev-buffer)
@@ -242,8 +239,8 @@ struct BufferDesc {
     std::string name;
     std::string dtype;
     size_t count = 0;
-    std::string placement; // "window" or "device"
-    void *dev_ptr = nullptr;
+    std::string placement;  // "window" or "device"
+    void* dev_ptr = nullptr;
 
     size_t elem_size() const {
         if (dtype == "float32" || dtype == "int32" || dtype == "uint32") return 4;
@@ -260,7 +257,7 @@ struct KernelBinDesc {
     std::string filename;
 };
 
-static BufferDesc parse_buffer_spec(const std::string &spec) {
+static BufferDesc parse_buffer_spec(const std::string& spec) {
     BufferDesc b;
     size_t p1 = spec.find(':');
     size_t p2 = spec.find(':', p1 + 1);
@@ -270,7 +267,7 @@ static BufferDesc parse_buffer_spec(const std::string &spec) {
     return b;
 }
 
-static KernelBinDesc parse_kernel_spec(const std::string &spec) {
+static KernelBinDesc parse_kernel_spec(const std::string& spec) {
     size_t p = spec.find(':');
     KernelBinDesc k;
     k.func_id = std::atoi(spec.substr(0, p).c_str());
@@ -282,8 +279,8 @@ static KernelBinDesc parse_kernel_spec(const std::string &spec) {
 // Helpers
 // ============================================================================
 
-static inline void *WindowAlloc(uint64_t windowBase, size_t &offset, size_t bytes) {
-    void *ptr = reinterpret_cast<void *>(windowBase + offset);
+static inline void* WindowAlloc(uint64_t windowBase, size_t& offset, size_t bytes) {
+    void* ptr = reinterpret_cast<void*>(windowBase + offset);
     offset += bytes;
     return ptr;
 }
@@ -296,14 +293,18 @@ static inline void HcclHostBarrier(HcclComm comm, aclrtStream stream) {
 using fn_get_runtime_size_t = size_t (*)();
 using fn_set_device_t = int (*)(int);
 using fn_init_runtime_t = int (*)(void*,
-    const uint8_t*, size_t, const char*,
-    uint64_t*, int, int*, uint64_t*,
-    const int*, const uint8_t* const*, const size_t*, int);
-using fn_launch_runtime_t = int (*)(void*,
-    int, int, int,
-    const uint8_t*, size_t,
-    const uint8_t*, size_t,
+    const uint8_t*,
+    size_t,
+    const char*,
+    uint64_t*,
+    int,
+    int*,
+    uint64_t*,
+    const int*,
+    const uint8_t* const*,
+    const size_t*,
     int);
+using fn_launch_runtime_t = int (*)(void*, int, int, int, const uint8_t*, size_t, const uint8_t*, size_t, int);
 using fn_finalize_runtime_t = int (*)(void*);
 
 static std::vector<uint8_t> read_file(const std::string& path) {
@@ -335,15 +336,14 @@ static bool wait_for_file(const std::string& path, int timeout_sec = 120) {
     return false;
 }
 
-static void file_barrier(const std::string& dir, int rank, int nranks,
-                          const std::string& tag) {
-    std::string my_marker = dir + "/barrier_" + tag + "_" +
-                            std::to_string(rank) + ".ready";
-    { std::ofstream(my_marker) << "1"; }
+static void file_barrier(const std::string& dir, int rank, int nranks, const std::string& tag) {
+    std::string my_marker = dir + "/barrier_" + tag + "_" + std::to_string(rank) + ".ready";
+    {
+        std::ofstream(my_marker) << "1";
+    }
 
     for (int r = 0; r < nranks; ++r) {
-        std::string marker = dir + "/barrier_" + tag + "_" +
-                             std::to_string(r) + ".ready";
+        std::string marker = dir + "/barrier_" + tag + "_" + std::to_string(r) + ".ready";
         while (true) {
             std::ifstream f(marker);
             if (f.good()) break;
@@ -426,8 +426,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (device_id < 0 || rank < 0 || nranks <= 0 ||
-        artifact_dir.empty() || rootinfo_file.empty()) {
+    if (device_id < 0 || rank < 0 || nranks <= 0 || artifact_dir.empty() || rootinfo_file.empty()) {
         fprintf(stderr,
             "Usage: distributed_worker --device-id N --rank R --nranks N "
             "--artifact-dir PATH --rootinfo-file PATH "
@@ -444,15 +443,22 @@ int main(int argc, char** argv) {
     }
 
     auto find_buffer = [&](const std::string& name) -> BufferDesc* {
-        for (auto& b : buffers) if (b.name == name) return &b;
+        for (auto& b : buffers)
+            if (b.name == name) return &b;
         return nullptr;
     };
 
-    fprintf(stderr, "[rank %d] Starting: device=%d, nranks=%d, root=%d, "
-            "orch=%s::%s, buffers=%zu, args=%zu\n",
-            rank, device_id, nranks, root,
-            orch_file.c_str(), orch_func.c_str(),
-            buffers.size(), arg_tokens.size());
+    fprintf(stderr,
+        "[rank %d] Starting: device=%d, nranks=%d, root=%d, "
+        "orch=%s::%s, buffers=%zu, args=%zu\n",
+        rank,
+        device_id,
+        nranks,
+        root,
+        orch_file.c_str(),
+        orch_func.c_str(),
+        buffers.size(),
+        arg_tokens.size());
 
     // ========================================================================
     // Phase 0: Load simpler shared library
@@ -465,13 +471,12 @@ int main(int argc, char** argv) {
     }
 
     auto fn_get_runtime_size = (fn_get_runtime_size_t)dlsym(lib, "get_runtime_size");
-    auto fn_set_device       = (fn_set_device_t)dlsym(lib, "set_device");
-    auto fn_init_runtime     = (fn_init_runtime_t)dlsym(lib, "init_runtime");
-    auto fn_launch_runtime   = (fn_launch_runtime_t)dlsym(lib, "launch_runtime");
+    auto fn_set_device = (fn_set_device_t)dlsym(lib, "set_device");
+    auto fn_init_runtime = (fn_init_runtime_t)dlsym(lib, "init_runtime");
+    auto fn_launch_runtime = (fn_launch_runtime_t)dlsym(lib, "launch_runtime");
     auto fn_finalize_runtime = (fn_finalize_runtime_t)dlsym(lib, "finalize_runtime");
 
-    if (!fn_get_runtime_size || !fn_set_device || !fn_init_runtime ||
-        !fn_launch_runtime || !fn_finalize_runtime) {
+    if (!fn_get_runtime_size || !fn_set_device || !fn_init_runtime || !fn_launch_runtime || !fn_finalize_runtime) {
         fprintf(stderr, "[rank %d] dlsym failed: %s\n", rank, dlerror());
         dlclose(lib);
         return 2;
@@ -490,8 +495,7 @@ int main(int argc, char** argv) {
 
     aRet = aclrtSetDevice(device_id);
     if (aRet != ACL_SUCCESS) {
-        fprintf(stderr, "[rank %d] aclrtSetDevice(%d) failed: %d\n",
-                rank, device_id, (int)aRet);
+        fprintf(stderr, "[rank %d] aclrtSetDevice(%d) failed: %d\n", rank, device_id, (int)aRet);
         dlclose(lib);
         return 3;
     }
@@ -510,8 +514,7 @@ int main(int argc, char** argv) {
         std::ofstream fout(rootinfo_file, std::ios::binary);
         fout.write(rootInfo.internal, HCCL_ROOT_INFO_BYTES);
         fout.close();
-        fprintf(stderr, "[rank 0] RootInfo written to %s (%u bytes)\n",
-                rootinfo_file.c_str(), HCCL_ROOT_INFO_BYTES);
+        fprintf(stderr, "[rank 0] RootInfo written to %s (%u bytes)\n", rootinfo_file.c_str(), HCCL_ROOT_INFO_BYTES);
     } else {
         fprintf(stderr, "[rank %d] Waiting for rootinfo file ...\n", rank);
         if (!wait_for_file(rootinfo_file)) {
@@ -531,12 +534,10 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "[rank %d] HcclCommInitRootInfo (nranks=%d) ...\n", rank, nranks);
     HcclComm comm = nullptr;
-    HcclResult hret = HcclCommInitRootInfo(
-        static_cast<uint32_t>(nranks), &rootInfo,
-        static_cast<uint32_t>(rank), &comm);
+    HcclResult hret =
+        HcclCommInitRootInfo(static_cast<uint32_t>(nranks), &rootInfo, static_cast<uint32_t>(rank), &comm);
     if (hret != HCCL_SUCCESS) {
-        fprintf(stderr, "[rank %d] HcclCommInitRootInfo failed: %d\n",
-                rank, (int)hret);
+        fprintf(stderr, "[rank %d] HcclCommInitRootInfo failed: %d\n", rank, (int)hret);
         return 3;
     }
     fprintf(stderr, "[rank %d] HCCL comm initialized\n", rank);
@@ -544,26 +545,22 @@ int main(int argc, char** argv) {
     char group[128] = {};
     hret = HcclGetCommName(comm, group);
     if (hret != HCCL_SUCCESS) {
-        fprintf(stderr, "[rank %d] HcclGetCommName failed: %d\n",
-                rank, (int)hret);
+        fprintf(stderr, "[rank %d] HcclGetCommName failed: %d\n", rank, (int)hret);
         return 3;
     }
 
     CommTopo topoType = 0;
     hret = HcomGetL0TopoTypeEx(group, &topoType, COMM_IS_NOT_SET_DEVICE);
     if (hret != HCCL_SUCCESS) {
-        fprintf(stderr, "[rank %d] HcomGetL0TopoTypeEx failed: %d\n",
-                rank, (int)hret);
+        fprintf(stderr, "[rank %d] HcomGetL0TopoTypeEx failed: %d\n", rank, (int)hret);
         return 3;
     }
-    fprintf(stderr, "[rank %d] Topology: %s\n", rank,
-            topoType == COMM_TOPO_MESH ? "MESH" : "RING");
+    fprintf(stderr, "[rank %d] Topology: %s\n", rank, topoType == COMM_TOPO_MESH ? "MESH" : "RING");
 
     HcclComm commHandle = nullptr;
     hret = HcomGetCommHandleByGroup(group, &commHandle);
     if (hret != HCCL_SUCCESS) {
-        fprintf(stderr, "[rank %d] HcomGetCommHandleByGroup failed: %d\n",
-                rank, (int)hret);
+        fprintf(stderr, "[rank %d] HcomGetCommHandleByGroup failed: %d\n", rank, (int)hret);
         return 3;
     }
 
@@ -575,72 +572,60 @@ int main(int argc, char** argv) {
     tiling.init.mc2HcommCnt = 1U;
     tiling.init.commBlockNum = 48U;
     tiling.init.devType = 4U;
-    tiling.init.offset[0] = static_cast<uint32_t>(
-        reinterpret_cast<uint64_t>(&tiling.inner) -
-        reinterpret_cast<uint64_t>(&tiling.init));
+    tiling.init.offset[0] =
+        static_cast<uint32_t>(reinterpret_cast<uint64_t>(&tiling.inner) - reinterpret_cast<uint64_t>(&tiling.init));
     tiling.inner.opType = 18U;
     tiling.inner.commEngine = 3U;
     tiling.inner.version = 1U;
     strncpy(tiling.inner.groupName, group, GROUP_NAME_SIZE - 1);
-    strncpy(tiling.inner.algConfig, "BatchWrite=level0:fullmesh",
-            ALG_CONFIG_SIZE - 1);
+    strncpy(tiling.inner.algConfig, "BatchWrite=level0:fullmesh", ALG_CONFIG_SIZE - 1);
 
-    void *ctxPtr = nullptr;
-    hret = HcclAllocComResourceByTiling(commHandle, hccl_stream,
-                                         &tiling, &ctxPtr);
+    void* ctxPtr = nullptr;
+    hret = HcclAllocComResourceByTiling(commHandle, hccl_stream, &tiling, &ctxPtr);
     if (hret != HCCL_SUCCESS || ctxPtr == nullptr) {
-        fprintf(stderr, "[rank %d] HcclAllocComResourceByTiling failed: %d\n",
-                rank, (int)hret);
+        fprintf(stderr, "[rank %d] HcclAllocComResourceByTiling failed: %d\n", rank, (int)hret);
         return 3;
     }
-    fprintf(stderr, "[rank %d] HCCL resources allocated, ctxPtr=%p\n",
-            rank, ctxPtr);
+    fprintf(stderr, "[rank %d] HCCL resources allocated, ctxPtr=%p\n", rank, ctxPtr);
 
     // Extract HcclDeviceContext (MESH vs RING)
     HcclDeviceContext hostCtx{};
-    HcclDeviceContext *deviceCtx = nullptr;
+    HcclDeviceContext* deviceCtx = nullptr;
     bool ownsDeviceCtx = false;
 
     if (topoType == COMM_TOPO_MESH) {
-        deviceCtx = reinterpret_cast<HcclDeviceContext *>(ctxPtr);
-        aRet = aclrtMemcpy(&hostCtx, sizeof(hostCtx), deviceCtx,
-                           sizeof(hostCtx), ACL_MEMCPY_DEVICE_TO_HOST);
+        deviceCtx = reinterpret_cast<HcclDeviceContext*>(ctxPtr);
+        aRet = aclrtMemcpy(&hostCtx, sizeof(hostCtx), deviceCtx, sizeof(hostCtx), ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] MESH: aclrtMemcpy deviceCtx failed: %d\n",
-                    rank, (int)aRet);
+            fprintf(stderr, "[rank %d] MESH: aclrtMemcpy deviceCtx failed: %d\n", rank, (int)aRet);
             return 3;
         }
     } else {
         using namespace hccl_compat;
-        auto *rawCtx = reinterpret_cast<uint8_t *>(ctxPtr);
+        auto* rawCtx = reinterpret_cast<uint8_t*>(ctxPtr);
 
         HcclOpResParamHead head{};
         const size_t headOff = offsetof(HcclOpResParam, localUsrRankId);
-        aRet = aclrtMemcpy(&head, sizeof(head), rawCtx + headOff,
-                           sizeof(head), ACL_MEMCPY_DEVICE_TO_HOST);
+        aRet = aclrtMemcpy(&head, sizeof(head), rawCtx + headOff, sizeof(head), ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] RING: read head failed: %d\n",
-                    rank, (int)aRet);
+            fprintf(stderr, "[rank %d] RING: read head failed: %d\n", rank, (int)aRet);
             return 3;
         }
 
         const size_t remoteResOff = offsetof(HcclOpResParam, remoteRes);
         const size_t remoteResBytes = head.rankSize * sizeof(RemoteResPtr);
         std::vector<RemoteResPtr> remoteResArr(head.rankSize);
-        aRet = aclrtMemcpy(remoteResArr.data(), remoteResBytes,
-                           rawCtx + remoteResOff, remoteResBytes,
-                           ACL_MEMCPY_DEVICE_TO_HOST);
+        aRet = aclrtMemcpy(
+            remoteResArr.data(), remoteResBytes, rawCtx + remoteResOff, remoteResBytes, ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] RING: read remoteRes failed: %d\n",
-                    rank, (int)aRet);
+            fprintf(stderr, "[rank %d] RING: read remoteRes failed: %d\n", rank, (int)aRet);
             return 3;
         }
 
         memset(&hostCtx, 0, sizeof(hostCtx));
 
         uint64_t wsFields[2] = {0, 0};
-        aclrtMemcpy(wsFields, sizeof(wsFields), rawCtx, sizeof(wsFields),
-                    ACL_MEMCPY_DEVICE_TO_HOST);
+        aclrtMemcpy(wsFields, sizeof(wsFields), rawCtx, sizeof(wsFields), ACL_MEMCPY_DEVICE_TO_HOST);
         hostCtx.workSpace = wsFields[0];
         hostCtx.workSpaceSize = wsFields[1];
         hostCtx.rankId = head.localUsrRankId;
@@ -654,48 +639,48 @@ int main(int argc, char** argv) {
             }
             uint64_t devPtr = remoteResArr[i].nextDevicePtr;
             if (devPtr == 0) {
-                fprintf(stderr, "[rank %d] RING: remoteRes[%u] is null\n",
-                        rank, i);
+                fprintf(stderr, "[rank %d] RING: remoteRes[%u] is null\n", rank, i);
                 return 3;
             }
             HcclRankRelationResV2 remoteInfo{};
-            aRet = aclrtMemcpy(&remoteInfo, sizeof(remoteInfo),
-                               reinterpret_cast<void*>(devPtr),
-                               sizeof(remoteInfo), ACL_MEMCPY_DEVICE_TO_HOST);
+            aRet = aclrtMemcpy(&remoteInfo,
+                sizeof(remoteInfo),
+                reinterpret_cast<void*>(devPtr),
+                sizeof(remoteInfo),
+                ACL_MEMCPY_DEVICE_TO_HOST);
             if (aRet != ACL_SUCCESS) {
-                fprintf(stderr, "[rank %d] RING: read remote info %u failed: %d\n",
-                        rank, i, (int)aRet);
+                fprintf(stderr, "[rank %d] RING: read remote info %u failed: %d\n", rank, i, (int)aRet);
                 return 3;
             }
             hostCtx.windowsIn[i] = remoteInfo.windowsIn;
         }
 
-        void *newDevMem = nullptr;
-        aRet = aclrtMalloc(&newDevMem, sizeof(HcclDeviceContext),
-                           ACL_MEM_MALLOC_HUGE_FIRST);
+        void* newDevMem = nullptr;
+        aRet = aclrtMalloc(&newDevMem, sizeof(HcclDeviceContext), ACL_MEM_MALLOC_HUGE_FIRST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] RING: malloc deviceCtx failed: %d\n",
-                    rank, (int)aRet);
+            fprintf(stderr, "[rank %d] RING: malloc deviceCtx failed: %d\n", rank, (int)aRet);
             return 3;
         }
-        aRet = aclrtMemcpy(newDevMem, sizeof(HcclDeviceContext), &hostCtx,
-                           sizeof(HcclDeviceContext), ACL_MEMCPY_HOST_TO_DEVICE);
+        aRet = aclrtMemcpy(
+            newDevMem, sizeof(HcclDeviceContext), &hostCtx, sizeof(HcclDeviceContext), ACL_MEMCPY_HOST_TO_DEVICE);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] RING: copy deviceCtx failed: %d\n",
-                    rank, (int)aRet);
+            fprintf(stderr, "[rank %d] RING: copy deviceCtx failed: %d\n", rank, (int)aRet);
             aclrtFree(newDevMem);
             return 3;
         }
-        deviceCtx = reinterpret_cast<HcclDeviceContext *>(newDevMem);
+        deviceCtx = reinterpret_cast<HcclDeviceContext*>(newDevMem);
         ownsDeviceCtx = true;
     }
 
-    fprintf(stderr, "[rank %d] HCCL context: rankId=%u, rankNum=%u, "
-            "winSize=%lu\n", rank, hostCtx.rankId, hostCtx.rankNum,
-            hostCtx.winSize);
+    fprintf(stderr,
+        "[rank %d] HCCL context: rankId=%u, rankNum=%u, "
+        "winSize=%lu\n",
+        rank,
+        hostCtx.rankId,
+        hostCtx.rankNum,
+        hostCtx.winSize);
     for (uint32_t i = 0; i < hostCtx.rankNum && i < HCCL_MAX_RANK_NUM; ++i) {
-        fprintf(stderr, "[rank %d]   windowsIn[%u] = 0x%lx\n",
-                rank, i, hostCtx.windowsIn[i]);
+        fprintf(stderr, "[rank %d]   windowsIn[%u] = 0x%lx\n", rank, i, hostCtx.windowsIn[i]);
     }
 
     // ========================================================================
@@ -711,24 +696,32 @@ int main(int argc, char** argv) {
         if (buf.placement == "window") {
             buf.dev_ptr = WindowAlloc(localWinBase, winOffset, buf.bytes());
         } else {
-            aRet = aclrtMalloc(&buf.dev_ptr, buf.bytes(),
-                               ACL_MEM_MALLOC_HUGE_FIRST);
+            aRet = aclrtMalloc(&buf.dev_ptr, buf.bytes(), ACL_MEM_MALLOC_HUGE_FIRST);
             if (aRet != ACL_SUCCESS) {
-                fprintf(stderr, "[rank %d] aclrtMalloc '%s' (%zu bytes) failed: %d\n",
-                        rank, buf.name.c_str(), buf.bytes(), (int)aRet);
+                fprintf(stderr,
+                    "[rank %d] aclrtMalloc '%s' (%zu bytes) failed: %d\n",
+                    rank,
+                    buf.name.c_str(),
+                    buf.bytes(),
+                    (int)aRet);
                 return 3;
             }
         }
-        fprintf(stderr, "[rank %d] Buffer '%s': %s %zu x %s = %zu bytes @ %p\n",
-                rank, buf.name.c_str(), buf.placement.c_str(),
-                buf.count, buf.dtype.c_str(), buf.bytes(), buf.dev_ptr);
+        fprintf(stderr,
+            "[rank %d] Buffer '%s': %s %zu x %s = %zu bytes @ %p\n",
+            rank,
+            buf.name.c_str(),
+            buf.placement.c_str(),
+            buf.count,
+            buf.dtype.c_str(),
+            buf.bytes(),
+            buf.dev_ptr);
     }
 
     for (auto& name : load_names) {
-        auto *buf = find_buffer(name);
+        auto* buf = find_buffer(name);
         if (!buf) {
-            fprintf(stderr, "[rank %d] --load: buffer '%s' not found\n",
-                    rank, name.c_str());
+            fprintf(stderr, "[rank %d] --load: buffer '%s' not found\n", rank, name.c_str());
             return 1;
         }
         std::string path = data_dir + "/" + name + ".bin";
@@ -738,25 +731,26 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (host_data.size() != buf->bytes()) {
-            fprintf(stderr, "[rank %d] Size mismatch for '%s': file=%zu, expected=%zu\n",
-                    rank, name.c_str(), host_data.size(), buf->bytes());
+            fprintf(stderr,
+                "[rank %d] Size mismatch for '%s': file=%zu, expected=%zu\n",
+                rank,
+                name.c_str(),
+                host_data.size(),
+                buf->bytes());
             return 2;
         }
 
-        void *staging = nullptr;
+        void* staging = nullptr;
         aRet = aclrtMalloc(&staging, buf->bytes(), ACL_MEM_MALLOC_HUGE_FIRST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] aclrtMalloc staging for '%s' failed\n",
-                    rank, name.c_str());
+            fprintf(stderr, "[rank %d] aclrtMalloc staging for '%s' failed\n", rank, name.c_str());
             return 3;
         }
-        aclrtMemcpy(staging, buf->bytes(), host_data.data(), buf->bytes(),
-                    ACL_MEMCPY_HOST_TO_DEVICE);
-        aclrtMemcpy(buf->dev_ptr, buf->bytes(), staging, buf->bytes(),
-                    ACL_MEMCPY_DEVICE_TO_DEVICE);
+        aclrtMemcpy(staging, buf->bytes(), host_data.data(), buf->bytes(), ACL_MEMCPY_HOST_TO_DEVICE);
+        aclrtMemcpy(buf->dev_ptr, buf->bytes(), staging, buf->bytes(), ACL_MEMCPY_DEVICE_TO_DEVICE);
         aclrtFree(staging);
-        fprintf(stderr, "[rank %d] Loaded '%s' from %s (%zu bytes)\n",
-                rank, name.c_str(), path.c_str(), host_data.size());
+        fprintf(
+            stderr, "[rank %d] Loaded '%s' from %s (%zu bytes)\n", rank, name.c_str(), path.c_str(), host_data.size());
     }
 
     HcclHostBarrier(comm, (aclrtStream)hccl_stream);
@@ -765,115 +759,129 @@ int main(int argc, char** argv) {
     // Phase 5: Generic kernel execution via simpler (CLI-driven)
     // ========================================================================
     {
-    int rc = fn_set_device(device_id);
-    if (rc != 0) {
-        fprintf(stderr, "[rank %d] simpler set_device failed: %d\n", rank, rc);
-        dlclose(lib);
-        return 4;
-    }
+        int rc = fn_set_device(device_id);
+        if (rc != 0) {
+            fprintf(stderr, "[rank %d] simpler set_device failed: %d\n", rank, rc);
+            dlclose(lib);
+            return 4;
+        }
 
-    auto orch_so  = read_file(artifact_dir + "/" + orch_file);
-    auto aicpu_so = read_file(artifact_dir + "/libaicpu_kernel.so");
-    auto aicore_o = read_file(artifact_dir + "/aicore_kernel.o");
+        auto orch_so = read_file(artifact_dir + "/" + orch_file);
+        auto aicpu_so = read_file(artifact_dir + "/libaicpu_kernel.so");
+        auto aicore_o = read_file(artifact_dir + "/aicore_kernel.o");
 
-    if (orch_so.empty() || aicpu_so.empty() || aicore_o.empty()) {
-        fprintf(stderr, "[rank %d] Failed to load runtime artifacts from %s\n",
-                rank, artifact_dir.c_str());
-        dlclose(lib);
-        return 2;
-    }
-
-    // Load kernel binaries
-    std::vector<std::vector<uint8_t>> k_data(kernel_bins.size());
-    std::vector<int> k_func_ids(kernel_bins.size());
-    std::vector<const uint8_t*> k_ptrs(kernel_bins.size());
-    std::vector<size_t> k_sizes(kernel_bins.size());
-    for (size_t ki = 0; ki < kernel_bins.size(); ++ki) {
-        k_data[ki] = read_file(artifact_dir + "/" + kernel_bins[ki].filename);
-        if (k_data[ki].empty()) {
-            fprintf(stderr, "[rank %d] Failed to load kernel %s\n",
-                    rank, kernel_bins[ki].filename.c_str());
+        if (orch_so.empty() || aicpu_so.empty() || aicore_o.empty()) {
+            fprintf(stderr, "[rank %d] Failed to load runtime artifacts from %s\n", rank, artifact_dir.c_str());
             dlclose(lib);
             return 2;
         }
-        k_func_ids[ki] = kernel_bins[ki].func_id;
-        k_ptrs[ki] = k_data[ki].data();
-        k_sizes[ki] = k_data[ki].size();
-    }
 
-    // Assemble args from --arg tokens
-    std::vector<uint64_t> func_args;
-    for (auto& tok : arg_tokens) {
-        if (tok == "nranks") {
-            func_args.push_back(static_cast<uint64_t>(nranks));
-        } else if (tok == "root") {
-            func_args.push_back(static_cast<uint64_t>(root));
-        } else if (tok == "deviceCtx") {
-            func_args.push_back(reinterpret_cast<uint64_t>(deviceCtx));
-        } else {
-            auto *buf = find_buffer(tok);
-            if (!buf) {
-                fprintf(stderr, "[rank %d] --arg: unknown token '%s'\n",
-                        rank, tok.c_str());
+        // Load kernel binaries
+        std::vector<std::vector<uint8_t>> k_data(kernel_bins.size());
+        std::vector<int> k_func_ids(kernel_bins.size());
+        std::vector<const uint8_t*> k_ptrs(kernel_bins.size());
+        std::vector<size_t> k_sizes(kernel_bins.size());
+        for (size_t ki = 0; ki < kernel_bins.size(); ++ki) {
+            k_data[ki] = read_file(artifact_dir + "/" + kernel_bins[ki].filename);
+            if (k_data[ki].empty()) {
+                fprintf(stderr, "[rank %d] Failed to load kernel %s\n", rank, kernel_bins[ki].filename.c_str());
                 dlclose(lib);
-                return 1;
+                return 2;
             }
-            func_args.push_back(reinterpret_cast<uint64_t>(buf->dev_ptr));
+            k_func_ids[ki] = kernel_bins[ki].func_id;
+            k_ptrs[ki] = k_data[ki].data();
+            k_sizes[ki] = k_data[ki].size();
         }
-    }
 
-    int n_args = static_cast<int>(func_args.size());
-    std::vector<int> arg_types(n_args, 0);
-    std::vector<uint64_t> arg_sizes(n_args, 0);
+        // Assemble args from --arg tokens
+        std::vector<uint64_t> func_args;
+        for (auto& tok : arg_tokens) {
+            if (tok == "nranks") {
+                func_args.push_back(static_cast<uint64_t>(nranks));
+            } else if (tok == "root") {
+                func_args.push_back(static_cast<uint64_t>(root));
+            } else if (tok == "deviceCtx") {
+                func_args.push_back(reinterpret_cast<uint64_t>(deviceCtx));
+            } else {
+                auto* buf = find_buffer(tok);
+                if (!buf) {
+                    fprintf(stderr, "[rank %d] --arg: unknown token '%s'\n", rank, tok.c_str());
+                    dlclose(lib);
+                    return 1;
+                }
+                func_args.push_back(reinterpret_cast<uint64_t>(buf->dev_ptr));
+            }
+        }
 
-    size_t rt_size = fn_get_runtime_size();
-    void* runtime = std::malloc(rt_size);
-    if (!runtime) {
-        fprintf(stderr, "[rank %d] malloc runtime failed\n", rank);
-        dlclose(lib);
-        return 4;
-    }
+        int n_args = static_cast<int>(func_args.size());
+        std::vector<int> arg_types(n_args, 0);
+        std::vector<uint64_t> arg_sizes(n_args, 0);
 
-    fprintf(stderr, "[rank %d] Initializing simpler runtime (%d args, %zu kernels) ...\n",
-            rank, n_args, kernel_bins.size());
-    rc = fn_init_runtime(runtime,
-        orch_so.data(), orch_so.size(), orch_func.c_str(),
-        func_args.data(), n_args, arg_types.data(), arg_sizes.data(),
-        k_func_ids.data(), k_ptrs.data(), k_sizes.data(),
-        static_cast<int>(kernel_bins.size()));
+        size_t rt_size = fn_get_runtime_size();
+        void* runtime = std::malloc(rt_size);
+        if (!runtime) {
+            fprintf(stderr, "[rank %d] malloc runtime failed\n", rank);
+            dlclose(lib);
+            return 4;
+        }
 
-    if (rc != 0) {
-        fprintf(stderr, "[rank %d] simpler init_runtime failed: %d\n", rank, rc);
-        std::free(runtime);
-        dlclose(lib);
-        return 4;
-    }
+        fprintf(stderr,
+            "[rank %d] Initializing simpler runtime (%d args, %zu kernels) ...\n",
+            rank,
+            n_args,
+            kernel_bins.size());
+        rc = fn_init_runtime(runtime,
+            orch_so.data(),
+            orch_so.size(),
+            orch_func.c_str(),
+            func_args.data(),
+            n_args,
+            arg_types.data(),
+            arg_sizes.data(),
+            k_func_ids.data(),
+            k_ptrs.data(),
+            k_sizes.data(),
+            static_cast<int>(kernel_bins.size()));
 
-    fprintf(stderr, "[rank %d] Launching kernel via simpler "
+        if (rc != 0) {
+            fprintf(stderr, "[rank %d] simpler init_runtime failed: %d\n", rank, rc);
+            std::free(runtime);
+            dlclose(lib);
+            return 4;
+        }
+
+        fprintf(stderr,
+            "[rank %d] Launching kernel via simpler "
             "(aicpu_threads=%d, block_dim=%d, orch_threads=%d) ...\n",
-            rank, aicpu_thread_num, block_dim, orch_thread_num);
-    rc = fn_launch_runtime(runtime,
-        aicpu_thread_num, block_dim, device_id,
-        aicpu_so.data(), aicpu_so.size(),
-        aicore_o.data(), aicore_o.size(), orch_thread_num);
+            rank,
+            aicpu_thread_num,
+            block_dim,
+            orch_thread_num);
+        rc = fn_launch_runtime(runtime,
+            aicpu_thread_num,
+            block_dim,
+            device_id,
+            aicpu_so.data(),
+            aicpu_so.size(),
+            aicore_o.data(),
+            aicore_o.size(),
+            orch_thread_num);
 
-    if (rc != 0) {
-        fprintf(stderr, "[rank %d] simpler launch_runtime failed: %d\n",
-                rank, rc);
-        std::free(runtime);
-        dlclose(lib);
-        return 4;
-    }
+        if (rc != 0) {
+            fprintf(stderr, "[rank %d] simpler launch_runtime failed: %d\n", rank, rc);
+            std::free(runtime);
+            dlclose(lib);
+            return 4;
+        }
 
-    rc = fn_finalize_runtime(runtime);
-    if (rc != 0) {
-        fprintf(stderr, "[rank %d] simpler finalize_runtime failed: %d\n",
-                rank, rc);
+        rc = fn_finalize_runtime(runtime);
+        if (rc != 0) {
+            fprintf(stderr, "[rank %d] simpler finalize_runtime failed: %d\n", rank, rc);
+            std::free(runtime);
+            dlclose(lib);
+            return 4;
+        }
         std::free(runtime);
-        dlclose(lib);
-        return 4;
-    }
-    std::free(runtime);
     }
 
     fprintf(stderr, "[rank %d] Kernel execution complete\n", rank);
@@ -883,25 +891,21 @@ int main(int argc, char** argv) {
     // Phase 6: Save output buffers to files (CLI-driven, no verification)
     // ========================================================================
     for (auto& name : save_names) {
-        auto *buf = find_buffer(name);
+        auto* buf = find_buffer(name);
         if (!buf) {
-            fprintf(stderr, "[rank %d] --save: buffer '%s' not found\n",
-                    rank, name.c_str());
+            fprintf(stderr, "[rank %d] --save: buffer '%s' not found\n", rank, name.c_str());
             continue;
         }
         std::vector<uint8_t> host_data(buf->bytes());
-        aRet = aclrtMemcpy(host_data.data(), buf->bytes(),
-                           buf->dev_ptr, buf->bytes(),
-                           ACL_MEMCPY_DEVICE_TO_HOST);
+        aRet = aclrtMemcpy(host_data.data(), buf->bytes(), buf->dev_ptr, buf->bytes(), ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
-            fprintf(stderr, "[rank %d] Copy back '%s' failed: %d\n",
-                    rank, name.c_str(), (int)aRet);
+            fprintf(stderr, "[rank %d] Copy back '%s' failed: %d\n", rank, name.c_str(), (int)aRet);
             continue;
         }
         std::string path = data_dir + "/" + name + ".bin";
         if (write_file(path, host_data.data(), host_data.size())) {
-            fprintf(stderr, "[rank %d] Saved '%s' to %s (%zu bytes)\n",
-                    rank, name.c_str(), path.c_str(), host_data.size());
+            fprintf(
+                stderr, "[rank %d] Saved '%s' to %s (%zu bytes)\n", rank, name.c_str(), path.c_str(), host_data.size());
         } else {
             fprintf(stderr, "[rank %d] Failed to write %s\n", rank, path.c_str());
         }
