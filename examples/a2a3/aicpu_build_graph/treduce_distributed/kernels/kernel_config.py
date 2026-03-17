@@ -1,12 +1,9 @@
 """
-Distributed TREDUCE kernel configuration.
+Distributed TREDUCE kernel configuration — aicpu_build_graph runtime.
 
-Multi-card collective reduce (Sum) across N ranks using PTO comm instructions.
-Communication addresses are set up by the distributed_worker via HCCL.
-
-DISTRIBUTED_CONFIG is the "multi-card graph" — it describes buffer layout,
-args order, and artifact names. DistributedRunner translates this into
-distributed_worker CLI arguments. No manifest file is needed.
+The AICPU orchestration plugin reads args from runtime->orch_args[],
+builds the task graph via the aicpu_build_api, and publishes tasks for
+the AICPU scheduler threads.
 """
 
 from pathlib import Path
@@ -27,9 +24,13 @@ KERNELS = [
 ]
 
 RUNTIME_CONFIG = {
-    "runtime": "host_build_graph",
-    "aicpu_thread_num": 1,
-    "block_dim": 1,
+    "runtime": "aicpu_build_graph",
+    "aicpu_thread_num": 4,
+    "block_dim": 4,
+}
+
+RUNTIME_ENV = {
+    "PTO_AICPU_BUILD_GRAPH_BUILD_MODE": "1",
 }
 
 DISTRIBUTED_CONFIG = {

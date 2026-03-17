@@ -1,12 +1,8 @@
 """
-Distributed TREDUCE kernel configuration.
+Distributed TREDUCE kernel configuration — tensormap_and_ringbuffer runtime.
 
-Multi-card collective reduce (Sum) across N ranks using PTO comm instructions.
-Communication addresses are set up by the distributed_worker via HCCL.
-
-DISTRIBUTED_CONFIG is the "multi-card graph" — it describes buffer layout,
-args order, and artifact names. DistributedRunner translates this into
-distributed_worker CLI arguments. No manifest file is needed.
+Device-side orchestration via PTO2Runtime API. The orchestration function
+wraps each arg as a PTOParam (tensor or scalar) and submits a single AIV task.
 """
 
 from pathlib import Path
@@ -15,7 +11,7 @@ _KERNELS_ROOT = Path(__file__).parent
 
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "treduce_orch.cpp"),
-    "function_name": "build_treduce_graph",
+    "function_name": "aicpu_orchestration_entry",
 }
 
 KERNELS = [
@@ -27,9 +23,11 @@ KERNELS = [
 ]
 
 RUNTIME_CONFIG = {
-    "runtime": "host_build_graph",
-    "aicpu_thread_num": 1,
-    "block_dim": 1,
+    "runtime": "tensormap_and_ringbuffer",
+    "aicpu_thread_num": 4,
+    "block_dim": 3,
+    "orch_thread_num": 1,
+    "rounds": 1,
 }
 
 DISTRIBUTED_CONFIG = {
