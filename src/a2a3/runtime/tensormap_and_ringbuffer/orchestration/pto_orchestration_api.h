@@ -1,13 +1,3 @@
-/*
- * Copyright (c) PyPTO Contributors.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- * -----------------------------------------------------------------------------------------------------------
- */
 /**
  * PTO Orchestration API - Slim header for orchestration .so files
  *
@@ -24,18 +14,17 @@
  * full PTO2Runtime struct with all internal fields).
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_ORCHESTRATION_PTO_ORCHESTRATION_API_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_ORCHESTRATION_PTO_ORCHESTRATION_API_H_
+#ifndef PTO_ORCHESTRATION_API_H
+#define PTO_ORCHESTRATION_API_H
 
+#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 
 // Type headers needed by orchestration
-#include "pto_submit_types.h"  // MixedKernels, INVALID_KERNEL_ID, subtask slots  // NOLINT(build/include_subdir)
-#include "pto_types.h"         // Arg, TaskOutputTensors, TensorArgType  // NOLINT(build/include_subdir)
-#include "task_args.h"         // ChipStorageTaskArgs, ContinuousTensor  // NOLINT(build/include_subdir)
-#include "tensor.h"            // Tensor, TensorCreateInfo  // NOLINT(build/include_subdir)
+#include "tensor.h"             // Tensor
+#include "pto_types.h"          // PTOParam, PTOTensorEntry, PTOParamType, PTO2AsyncEngine
+#include "pto_submit_types.h"   // MixedKernels, INVALID_KERNEL_ID, subtask slots
 
 // =============================================================================
 // Tensor Factory Helpers
@@ -44,38 +33,39 @@
 /**
  * Create a Tensor for pre-allocated external memory.
  */
-inline Tensor make_tensor_external(
-    void *addr, const uint32_t shapes[], uint32_t ndims, DataType dtype = DataType::FLOAT32, bool manual_dep = false,
-    int32_t version = 0
-) {
+static inline Tensor make_tensor_external(void* addr,
+    const uint32_t shapes[],
+    uint32_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    bool manual_dep = false,
+    int32_t version = 0) {
     static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
     uint64_t total = 1;
     for (uint32_t i = 0; i < ndims; i++) {
         total *= shapes[i];
     }
-    return {
-        addr,
-        total * get_element_size(dtype),
-        shapes,
-        shapes,
-        zero_offsets,
-        ndims,
-        dtype,
-        version,
-        /*is_all_offset_zero=*/true,
-        /*is_raw_eq_shapes=*/true,
-        manual_dep
-    };
+    return Tensor(addr, total * get_element_size(dtype), shapes, shapes, zero_offsets, ndims, dtype, version,
+                  /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/true, manual_dep);
 }
 
-// Convert ContinuousTensor to Tensor
-static_assert(
-    CONTINUOUS_TENSOR_MAX_DIMS == RUNTIME_MAX_TENSOR_DIMS, "ContinuousTensor and runtime max dims must match"
-);
-inline Tensor from_tensor_arg(const ContinuousTensor &t, bool manual_dep = false, int32_t version = 0) {
-    return make_tensor_external(
-        reinterpret_cast<void *>(static_cast<uintptr_t>(t.data)), t.shapes, t.ndims, t.dtype, manual_dep, version
-    );
+/**
+ * Create a Tensor for runtime-allocated output (addr=0).
+ * NO memory allocation: only records dtype, shape, and buffer.size in the Tensor struct.
+ * The runtime allocates from the heap ring and fills buffer.addr during pto2_submit_task
+ * when this tensor is passed as OUTPUT param. No buffer content is ever copied.
+ */
+static inline Tensor make_tensor(const uint32_t shapes[],
+    uint32_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    bool manual_dep = false,
+    int32_t version = 0) {
+    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t total = 1;
+    for (uint32_t i = 0; i < ndims; i++) {
+        total *= shapes[i];
+    }
+    return Tensor(0, total * get_element_size(dtype), shapes, shapes, zero_offsets, ndims, dtype, version,
+                  /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/true, manual_dep);
 }
 
 // =============================================================================
@@ -100,8 +90,8 @@ extern "C" {
  * aicpu_orchestration_entry(), so orchestration helpers can fetch the
  * current PTO2Runtime without explicit parameter threading.
  */
-PTO2Runtime *pto2_framework_current_runtime(void);
-void pto2_framework_bind_runtime(PTO2Runtime *rt);
+PTO2Runtime* pto2_framework_current_runtime(void);
+void pto2_framework_bind_runtime(PTO2Runtime* rt);
 
 #ifdef __cplusplus
 }
@@ -112,25 +102,21 @@ void pto2_framework_bind_runtime(PTO2Runtime *rt);
  * Populated by the runtime; called by orchestration through inline wrappers.
  */
 typedef struct PTO2RuntimeOps {
-    TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args);
-    void (*scope_begin)(PTO2Runtime *rt);
-    void (*scope_end)(PTO2Runtime *rt);
-    void (*orchestration_done)(PTO2Runtime *rt);
-    bool (*is_fatal)(PTO2Runtime *rt);
+    void (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
+                        const PTOParam& params);
+    uint64_t (*get_async_context)(PTO2Runtime* rt, PTO2AsyncEngine engine);
+    uint64_t (*alloc_cq)(PTO2Runtime* rt);
+    void (*scope_begin)(PTO2Runtime* rt);
+    void (*scope_end)(PTO2Runtime* rt);
+    void (*orchestration_done)(PTO2Runtime* rt);
+    bool (*is_fatal)(PTO2Runtime* rt);
 
     // Logging (populated by runtime, called by orchestration)
-    void (*log_error)(const char *func, const char *fmt, ...);
-    void (*log_warn)(const char *func, const char *fmt, ...);
-    void (*log_info)(const char *func, const char *fmt, ...);
-    void (*log_debug)(const char *func, const char *fmt, ...);
-    void (*log_always)(const char *func, const char *fmt, ...);
-
-    // Cross-layer data access (orchestration reads/writes tensor values via runtime)
-    // Placed after logging to avoid shifting hot-path field offsets.
-    uint64_t (*get_tensor_data)(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[]);
-    void (*set_tensor_data)(
-        PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
-    );
+    void (*log_error)(const char* func, const char* fmt, ...);
+    void (*log_warn)(const char* func, const char* fmt, ...);
+    void (*log_info)(const char* func, const char* fmt, ...);
+    void (*log_debug)(const char* func, const char* fmt, ...);
+    void (*log_always)(const char* func, const char* fmt, ...);
 } PTO2RuntimeOps;
 
 /**
@@ -141,57 +127,157 @@ typedef struct PTO2RuntimeOps {
  * is well-defined (C struct layout guarantee).
  */
 struct PTO2Runtime {
-    const PTO2RuntimeOps *ops;
+    const PTO2RuntimeOps* ops;
 };
 
 // =============================================================================
 // Inline Convenience Wrappers (call through ops table)
 // =============================================================================
 
-static inline PTO2Runtime *pto2_current_runtime() { return pto2_framework_current_runtime(); }
+static inline PTO2Runtime* pto2_current_runtime() {
+    return pto2_framework_current_runtime();
+}
 
-static inline TaskOutputTensors pto2_rt_submit_task(const MixedKernels &mixed_kernels, const Arg &args) {
-    PTO2Runtime *rt = pto2_current_runtime();
-    return rt->ops->submit_task(rt, mixed_kernels, args);
+static inline void pto2_rt_submit_task(const MixedKernels& mixed_kernels,
+                                       const PTOParam& params) {
+    PTO2Runtime* rt = pto2_current_runtime();
+    rt->ops->submit_task(rt, mixed_kernels, params);
 }
 
 /**
  * Convenience wrapper: submit an AIC-only task.
  */
-static inline TaskOutputTensors pto2_rt_submit_aic_task(int32_t kernel_id, const Arg &args) {
-    PTO2Runtime *rt = pto2_current_runtime();
+static inline void pto2_rt_submit_aic_task(int32_t kernel_id, const PTOParam& params) {
+    PTO2Runtime* rt = pto2_current_runtime();
     MixedKernels mk;
     mk.aic_kernel_id = kernel_id;
-    return rt->ops->submit_task(rt, mk, args);
+    rt->ops->submit_task(rt, mk, params);
 }
 
 /**
  * Convenience wrapper: submit an AIV-only task (uses AIV0 slot).
  */
-static inline TaskOutputTensors pto2_rt_submit_aiv_task(int32_t kernel_id, const Arg &args) {
-    PTO2Runtime *rt = pto2_current_runtime();
+static inline void pto2_rt_submit_aiv_task(int32_t kernel_id, const PTOParam& params) {
+    PTO2Runtime* rt = pto2_current_runtime();
     MixedKernels mk;
     mk.aiv0_kernel_id = kernel_id;
-    return rt->ops->submit_task(rt, mk, args);
+    rt->ops->submit_task(rt, mk, params);
+}
+static inline uint64_t pto2_rt_get_async_context(PTO2AsyncEngine engine) {
+    PTO2Runtime* rt = pto2_current_runtime();
+    return rt->ops->get_async_context(rt, engine);
+}
+
+static inline uint64_t pto2_rt_get_async_context(PTO2Runtime* rt, PTO2AsyncEngine engine) {
+    return rt->ops->get_async_context(rt, engine);
+}
+
+static inline uint64_t pto2_rt_get_sdma_context() {
+    return pto2_rt_get_async_context(PTO2_ASYNC_ENGINE_SDMA);
+}
+
+static inline uint64_t pto2_rt_get_sdma_context(PTO2Runtime* rt) {
+    return pto2_rt_get_async_context(rt, PTO2_ASYNC_ENGINE_SDMA);
+}
+
+// =============================================================================
+// CQ Model: Deferred Completion Wrappers
+// =============================================================================
+
+/**
+ * Allocate a zeroed per-task completion queue from the runtime pool.
+ * Returns the GM address (cast to uint64_t) or 0 on failure.
+ */
+static inline uint64_t pto2_rt_alloc_cq() {
+    PTO2Runtime* rt = pto2_current_runtime();
+    return rt->ops->alloc_cq(rt);
+}
+
+static inline uint64_t pto2_rt_alloc_cq(PTO2Runtime* rt) {
+    return rt->ops->alloc_cq(rt);
+}
+
+static inline void pto2_rt_expect_notification_counter(PTOParam& params,
+                                                       uint64_t counter_addr,
+                                                       uint32_t expected_value) {
+    params.has_launch_counter = true;
+    params.launch_counter_addr = counter_addr;
+    params.launch_counter_expected = expected_value;
+}
+
+/**
+ * Submit an AIV task with deferred completion (CQ model).
+ *
+ * The kernel decides at runtime how many async completions it has
+ * and writes them into the completion queue. The scheduler discovers
+ * completions by reading the CQ after all subtasks return.
+ *
+ * The CQ address is automatically appended as the last scalar
+ * so the kernel can access it from args[].
+ */
+static inline void pto2_rt_submit_aiv_task_deferred(int32_t kernel_id,
+                                                     PTOParam& params,
+                                                     uint64_t cq_addr) {
+    PTO2Runtime* rt = pto2_current_runtime();
+    params.complete_in_future = true;
+    params.cq_addr = cq_addr;
+    params.add_scalar(cq_addr);
+    MixedKernels mk;
+    mk.aiv0_kernel_id = kernel_id;
+    rt->ops->submit_task(rt, mk, params);
+}
+
+static inline void pto2_rt_submit_aiv_task_deferred(PTO2Runtime* rt,
+                                                     int32_t kernel_id,
+                                                     PTOParam& params,
+                                                     uint64_t cq_addr) {
+    params.complete_in_future = true;
+    params.cq_addr = cq_addr;
+    params.add_scalar(cq_addr);
+    MixedKernels mk;
+    mk.aiv0_kernel_id = kernel_id;
+    rt->ops->submit_task(rt, mk, params);
+}
+
+static inline void pto2_rt_submit_aic_task_deferred(int32_t kernel_id,
+                                                     PTOParam& params,
+                                                     uint64_t cq_addr) {
+    PTO2Runtime* rt = pto2_current_runtime();
+    params.complete_in_future = true;
+    params.cq_addr = cq_addr;
+    params.add_scalar(cq_addr);
+    MixedKernels mk;
+    mk.aic_kernel_id = kernel_id;
+    rt->ops->submit_task(rt, mk, params);
+}
+
+static inline void pto2_rt_submit_task_deferred(const MixedKernels& mixed_kernels,
+                                                 PTOParam& params,
+                                                 uint64_t cq_addr) {
+    PTO2Runtime* rt = pto2_current_runtime();
+    params.complete_in_future = true;
+    params.cq_addr = cq_addr;
+    params.add_scalar(cq_addr);
+    rt->ops->submit_task(rt, mixed_kernels, params);
 }
 
 static inline void pto2_rt_scope_begin() {
-    PTO2Runtime *rt = pto2_current_runtime();
+    PTO2Runtime* rt = pto2_current_runtime();
     rt->ops->scope_begin(rt);
 }
 
 static inline void pto2_rt_scope_end() {
-    PTO2Runtime *rt = pto2_current_runtime();
+    PTO2Runtime* rt = pto2_current_runtime();
     rt->ops->scope_end(rt);
 }
 
 static inline void pto2_rt_orchestration_done() {
-    PTO2Runtime *rt = pto2_current_runtime();
+    PTO2Runtime* rt = pto2_current_runtime();
     rt->ops->orchestration_done(rt);
 }
 
 static inline bool pto2_rt_is_fatal() {
-    PTO2Runtime *rt = pto2_current_runtime();
+    PTO2Runtime* rt = pto2_current_runtime();
     return rt->ops->is_fatal(rt);
 }
 
@@ -200,66 +286,10 @@ static inline bool pto2_rt_is_fatal() {
 // =============================================================================
 
 #define LOG_ERROR(fmt, ...) pto2_current_runtime()->ops->log_error(__FUNCTION__, fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...) pto2_current_runtime()->ops->log_warn(__FUNCTION__, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) pto2_current_runtime()->ops->log_info(__FUNCTION__, fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  pto2_current_runtime()->ops->log_warn(__FUNCTION__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  pto2_current_runtime()->ops->log_info(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) pto2_current_runtime()->ops->log_debug(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_ALWAYS(fmt, ...) pto2_current_runtime()->ops->log_always(__FUNCTION__, fmt, ##__VA_ARGS__)
-
-// =============================================================================
-// Cross-Layer Data Access
-// =============================================================================
-
-/**
- * Read a value from a tensor at the given multi-dimensional indices.
- *
- * Default T = uint64_t preserves old behavior (raw bits).
- * Specify T to get automatic type conversion:
- *
- *   uint64_t raw = get_tensor_data(tensor, 1, idx);       // old usage unchanged
- *   float val = get_tensor_data<float>(tensor, 1, idx);   // typed read
- *
- * If the tensor has a producer in TensorMap, spin-waits until the producer
- * task completes before reading. External tensors (make_tensor_external)
- * are read immediately without waiting.
- */
-template <typename T = uint64_t>
-static inline T get_tensor_data(const Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
-    PTO2Runtime *rt = pto2_current_runtime();
-    return from_u64<T>(rt->ops->get_tensor_data(rt, tensor, ndims, indices));
-}
-
-/**
- * Write a value to a tensor at the given multi-dimensional indices.
- *
- * Type is deduced from value argument; uint64_t by default:
- *
- *   set_tensor_data(tensor, 1, idx, raw_u64);     // old usage unchanged
- *   set_tensor_data(tensor, 1, idx, 42.0f);       // typed write (T = float)
- *
- * If the tensor has a producer in TensorMap, spin-waits until the producer
- * and all its consumers complete before writing (WAW + WAR safety).
- * External tensors (make_tensor_external) with no TensorMap entry are
- * written immediately without waiting.
- *
- * Limitation: TensorMap only tracks producers (OUTPUT/INOUT), not consumers
- * that used the tensor as INPUT. If a kernel reads this tensor as INPUT
- * (not INOUT) and the tensor has no TensorMap producer entry, set_tensor_data
- * cannot detect the reader and may cause a data race.
- *
- * To ensure WAR safety for all access patterns, use add_inout() instead of
- * add_input() for kernel parameters that may later be written via
- * set_tensor_data. INOUT creates a TensorMap entry that enables automatic
- * consumer tracking via fanout_refcount.
- *
- * The tensor must already have an allocated buffer (addr != 0).
- * For runtime-created outputs, call this only on the Tensor returned by
- * add_output(TensorCreateInfo) after submit returns.
- */
-template <typename T = uint64_t>
-static inline void set_tensor_data(const Tensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {
-    PTO2Runtime *rt = pto2_current_runtime();
-    rt->ops->set_tensor_data(rt, tensor, ndims, indices, to_u64(value));
-}
 
 // =============================================================================
 // C++ Scope Guards and Macros
@@ -269,18 +299,18 @@ static inline void set_tensor_data(const Tensor &tensor, uint32_t ndims, const u
  * RAII Scope Guard (calls through ops table)
  */
 class PTO2ScopeGuard {
-public:  // NOLINT(whitespace/indent)
-    PTO2ScopeGuard() :
-        rt_(pto2_current_runtime()) {
+public:
+    PTO2ScopeGuard() : rt_(pto2_current_runtime()) {
         rt_->ops->scope_begin(rt_);
     }
-    ~PTO2ScopeGuard() { rt_->ops->scope_end(rt_); }
-
-private:  // NOLINT(whitespace/indent)
-    PTO2Runtime *rt_;
+    ~PTO2ScopeGuard() {
+        rt_->ops->scope_end(rt_);
+    }
+private:
+    PTO2Runtime* rt_;
 };
 
-#define _PTO2_CONCATENATE_IMPL(x, y) x##y
+#define _PTO2_CONCATENATE_IMPL(x, y) x ## y
 #define _PTO2_CONCATENATE(x, y) _PTO2_CONCATENATE_IMPL(x, y)
 
 #define PTO2_SCOPE_GUARD() [[maybe_unused]] PTO2ScopeGuard _PTO2_CONCATENATE(scope_guard_, __COUNTER__)
@@ -307,8 +337,8 @@ private:  // NOLINT(whitespace/indent)
 #ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
 #define PTO2_ORCHESTRATION_CONFIG_DEFINED
 struct PTO2OrchestrationConfig {
-    int expected_arg_count;
+    int         expected_arg_count;
 };
 #endif
 
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_ORCHESTRATION_PTO_ORCHESTRATION_API_H_
+#endif // PTO_ORCHESTRATION_API_H

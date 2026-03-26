@@ -252,6 +252,27 @@ Golden.py interface:
         help="Explicit distributed device list, supports comma lists/ranges (e.g., 0,1,3,5 or 4-7)"
     )
 
+    parser.add_argument(
+        "--nranks",
+        type=int,
+        default=None,
+        help="Override number of ranks for distributed tests (default: from kernel_config)"
+    )
+
+    parser.add_argument(
+        "--device-range",
+        type=str,
+        default=None,
+        help="Explicit device range for distributed tests (e.g., 4-7)"
+    )
+
+    parser.add_argument(
+        "--devices",
+        type=str,
+        default=None,
+        help="Explicit distributed device list, supports comma lists/ranges (e.g., 0,1,3,5 or 4-7)"
+    )
+
     args = parser.parse_args()
 
     if args.all and args.case:

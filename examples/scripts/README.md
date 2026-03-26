@@ -474,6 +474,8 @@ TEST FAILED: Output 'f' does not match golden
 - **Hardware Example**: [examples/a2a3/host_build_graph/vector_example/](../a2a3/host_build_graph/vector_example/)
 - **Simulation Example**: [examples/a2a3/host_build_graph/vector_example/](../a2a3/host_build_graph/vector_example/)
 - **Distributed Example**: [examples/a2a3/host_build_graph/allreduce_distributed/](../a2a3/host_build_graph/allreduce_distributed/)
+- **Async Completion Demo** (2-card, deferred RDMA read): [examples/a2a3/tensormap_and_ringbuffer/async_completion_demo/](../a2a3/tensormap_and_ringbuffer/async_completion_demo/)
+- **Async Notify Demo** (2-card, TNOTIFY launch gating): [examples/a2a3/tensormap_and_ringbuffer/async_notify_demo/](../a2a3/tensormap_and_ringbuffer/async_notify_demo/)
 
 ## FAQ
 

@@ -107,6 +107,9 @@ def main():
     Runtime = bind_host_binary(str(lib_path))
     sys.stderr.write(f"[rank {args.rank}] Library loaded\n")
 
+    set_device(args.device_id)
+    sys.stderr.write(f"[rank {args.rank}] Device {args.device_id} set for runtime\n")
+
     # ----------------------------------------------------------------
     # 2. Comm init + alloc windows
     # ----------------------------------------------------------------
@@ -121,9 +124,6 @@ def main():
     local_base = comm_get_local_window_base(comm)
 
     sys.stderr.write(f"[rank {args.rank}] Comm initialized, local_base=0x{local_base:x}\n")
-
-    set_device(args.device_id)
-    sys.stderr.write(f"[rank {args.rank}] Device {args.device_id} set for runtime\n")
 
     # ----------------------------------------------------------------
     # 3. Allocate buffers

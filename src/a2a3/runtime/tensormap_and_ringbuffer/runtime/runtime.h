@@ -1,13 +1,3 @@
-/*
- * Copyright (c) PyPTO Contributors.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- * -----------------------------------------------------------------------------------------------------------
- */
 /**
  * Runtime Class - Device Execution and Handshake Control
  *
@@ -21,13 +11,12 @@
  * - Function address mapping (func_id_to_addr_)
  *
  * Task dispatch uses a per-core PTO2DispatchPayload written by the scheduler.
- * At dispatch time, build_payload() copies tensor pointers and scalars from
- * the task payload into the per-core args[], populates SPMD context, then
- * signals AICore via DATA_MAIN_BASE.
+ * The Orchestrator pre-builds dispatch_args[] in each task payload; the
+ * scheduler only fills function_bin_addr + args before signaling AICore.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
+#ifndef RUNTIME_H
+#define RUNTIME_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,7 +27,7 @@
 #include "common/perf_profiling.h"
 #include "common/platform_config.h"
 #include "pto2_dispatch_payload.h"
-#include "task_args.h"
+#include "pto_runtime2_types.h"
 
 // =============================================================================
 // Configuration Macros
@@ -99,9 +88,9 @@ struct Handshake {
     volatile CoreType core_type;           // Core type: CoreType::AIC or CoreType::AIV
     volatile uint64_t perf_records_addr;   // Performance records address
     volatile uint32_t perf_buffer_status;  // 0 = not full, 1 == full
-    volatile uint32_t physical_core_id;    // Physical core ID
+    volatile uint32_t physical_core_id;     // Physical core ID
     volatile uint32_t aicpu_regs_ready;    // AICPU register init done: 0=pending, 1=done
-    volatile uint32_t aicore_regs_ready;   // AICore ID reported: 0=pending, 1=done
+    volatile uint32_t aicore_regs_ready;     // AICore ID reported: 0=pending, 1=done
 } __attribute__((aligned(64)));
 
 /**
@@ -109,8 +98,8 @@ struct Handshake {
  * Used for copy-back during finalize.
  */
 struct TensorPair {
-    void *host_ptr;
-    void *dev_ptr;
+    void* host_ptr;
+    void* dev_ptr;
     size_t size;
 };
 
@@ -119,11 +108,11 @@ struct TensorPair {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void *(*device_malloc)(size_t size);
-    void (*device_free)(void *dev_ptr);
-    int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size);
-    int (*copy_from_device)(void *host_ptr, const void *dev_ptr, size_t size);
-    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t *bin_data, size_t bin_size);
+    void* (*device_malloc)(size_t size);
+    void (*device_free)(void* dev_ptr);
+    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
+    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
+    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, size_t bin_size);
     void (*remove_kernel_binary)(int func_id);
 };
 
@@ -151,14 +140,14 @@ struct Task {
  * execution control and device orchestration state.
  */
 class Runtime {
-public:  // NOLINT(whitespace/indent)
+public:
     // Handshake buffers for AICPU-AICore communication
     Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
     int worker_count;                       // Number of active workers
 
     // Execution parameters for AICPU scheduling
-    int sche_cpu_num;        // Number of AICPU threads for scheduling
-    int orch_thread_num;     // Number of orchestrator threads (default 1)
+    int sche_cpu_num;  // Number of AICPU threads for scheduling
+    int orch_thread_num;  // Number of orchestrator threads (default 1)
     int ready_queue_shards;  // Number of ready queue shards (1..MAX_AICPU_THREADS, default MAX-1)
 
     // Ring buffer size overrides (0 = use compile-time defaults)
@@ -171,7 +160,7 @@ public:  // NOLINT(whitespace/indent)
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
 
     // Profiling support
-    bool enable_profiling;  // Enable profiling flag
+    bool enable_profiling;    // Enable profiling flag
 
     // Orchestrator-to-scheduler transition control
     // When true, orchestrator threads convert to scheduler threads after orchestration completes.
@@ -180,7 +169,7 @@ public:  // NOLINT(whitespace/indent)
     bool orch_to_sched;
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
 
-private:  // NOLINT(whitespace/indent)
+private:
     // Tensor pairs for host-device memory tracking
     TensorPair tensor_pairs[RUNTIME_MAX_TENSOR_PAIRS];
     int tensor_pair_count;
@@ -191,17 +180,20 @@ private:  // NOLINT(whitespace/indent)
 
     // Device orchestration: when false, orchestration runs on device (thread 3)
     bool orch_built_on_host_;
-    void *pto2_gm_sm_ptr_;                   // GM pointer to PTO2 shared memory (device)
-    void *pto2_gm_heap_ptr_;                 // GM heap for orchestrator output buffers (device)
-    void *pto2_slot_states_ptr_;             // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
-    ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
+    void* pto2_gm_sm_ptr_;  // GM pointer to PTO2 shared memory (device)
+    void* pto2_gm_heap_ptr_;  // GM heap for orchestrator output buffers (device)
+    void* pto2_slot_states_ptr_;  // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
+    uint64_t async_context_addrs_[PTO2_NUM_ASYNC_ENGINES];  // Per-engine async context (0 = not available)
+    uint64_t* orch_args_;   // Arguments for device orchestration
+    int orch_arg_count_;
+    uint64_t orch_args_storage_[RUNTIME_MAX_ARGS];  // Copy of args for device
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
     // Stored as a copy to avoid lifetime issues with Python ctypes arrays
     uint8_t device_orch_so_storage_[RUNTIME_MAX_ORCH_SO_SIZE];
     size_t device_orch_so_size_;
 
-public:  // NOLINT(whitespace/indent)
+public:
     /**
      * Constructor - zero-initialize all arrays
      */
@@ -214,12 +206,12 @@ public:  // NOLINT(whitespace/indent)
     /**
      * Record a host-device tensor pair for copy-back during finalize.
      */
-    void record_tensor_pair(void *host_ptr, void *dev_ptr, size_t size);
+    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
 
     /**
      * Get pointer to tensor pairs array.
      */
-    TensorPair *get_tensor_pairs();
+    TensorPair* get_tensor_pairs();
 
     /**
      * Get number of recorded tensor pairs.
@@ -235,23 +227,36 @@ public:  // NOLINT(whitespace/indent)
     // Performance Profiling
     // =========================================================================
 
+    /**
+     * Fill fanout information for performance records
+     *
+     * Extracts task dependency data from the task graph and populates
+     * fanout arrays in performance records.
+     *
+     * @param perf_buf Performance buffer containing records to complete
+     */
+    void complete_perf_records(PerfBuffer* perf_buf);
+
     // =========================================================================
     // Device orchestration (for AICPU thread 3)
     // =========================================================================
 
     bool get_orch_built_on_host() const;
-    void *get_pto2_gm_sm_ptr() const;
-    void *get_pto2_gm_heap_ptr() const;
-    const ChipStorageTaskArgs &get_orch_args() const;
+    void* get_pto2_gm_sm_ptr() const;
+    void* get_pto2_gm_heap_ptr() const;
+    uint64_t* get_orch_args() const;
+    int get_orch_arg_count() const;
     void set_orch_built_on_host(bool v);
-    void set_pto2_gm_sm_ptr(void *p);
-    void set_pto2_gm_heap(void *p);
-    void set_pto2_slot_states_ptr(void *p);
-    void set_orch_args(const ChipStorageTaskArgs &args);
+    void set_pto2_gm_sm_ptr(void* p);
+    void set_pto2_gm_heap(void* p);
+    void set_pto2_slot_states_ptr(void* p);
+    void set_async_context_addr(PTO2AsyncEngine engine, uint64_t addr);
+    uint64_t get_async_context_addr(PTO2AsyncEngine engine) const;
+    void set_orch_args(uint64_t* args, int count);
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
-    void set_device_orch_so(const void *data, size_t size);
-    const void *get_device_orch_so_data() const;
+    void set_device_orch_so(const void* data, size_t size);
+    const void* get_device_orch_so_data() const;
     size_t get_device_orch_so_size() const;
 
     uint64_t get_function_bin_addr(int func_id) const;
@@ -270,7 +275,7 @@ public:  // NOLINT(whitespace/indent)
     int get_task_count() const { return 0; }
 
     /** @deprecated RT2 uses PTO2DispatchPayload, not Task. Always returns nullptr. */
-    Task *get_task(int) { return nullptr; }
+    Task* get_task(int) { return nullptr; }
 
     /** @deprecated Use PTO2 dispatch mode */
     bool get_use_pto2_dispatch() const { return true; }
@@ -287,4 +292,4 @@ public:  // NOLINT(whitespace/indent)
     HostApi host_api;
 };
 
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
+#endif  // RUNTIME_H

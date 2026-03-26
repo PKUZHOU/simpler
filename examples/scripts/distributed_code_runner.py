@@ -7,8 +7,8 @@ Python worker processes (one per rank) via distributed_worker.py.
 
 Usage:
     runner = DistributedCodeRunner(
-        kernels_dir="examples/a2a3/.../allreduce_distributed/kernels",
-        golden_path="examples/a2a3/.../allreduce_distributed/golden.py",
+        kernels_dir="path/to/distributed_test/kernels",
+        golden_path="path/to/distributed_test/golden.py",
         platform="a2a3", nranks=8,
     )
     runner.run()
@@ -388,7 +388,7 @@ class DistributedCodeRunner:
         output_names = dist.get("outputs", [])
         buf_map = {b["name"]: b for b in dist.get("buffers", [])}
 
-        # Compute expected outputs once (same for all ranks in allreduce).
+        # Compute expected outputs once for the distributed verification step.
         seed_dir = self.artifact_dir / f"rank_{self.root}"
         seed_outputs = {}
         for name in output_names:
