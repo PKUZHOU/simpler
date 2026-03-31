@@ -37,7 +37,6 @@
 #include "pto_shared_memory.h"
 
 struct PTO2SchedulerState;
-struct PTO2LocalReadyBuffer;
 
 #if PTO2_SCHED_PROFILING
 #include "aicpu/device_time.h"
