@@ -99,6 +99,15 @@ void ChipWorker::reset() {
     initialized_ = false;
 }
 
+void ChipWorker::run(const WorkerPayload &payload) {
+    CallConfig config;
+    config.block_dim = payload.block_dim;
+    config.aicpu_thread_num = payload.aicpu_thread_num;
+    config.orch_thread_num = payload.orch_thread_num;
+    config.enable_profiling = payload.enable_profiling;
+    run(payload.callable, payload.args, config);
+}
+
 void ChipWorker::run(const void *callable, const void *args, const CallConfig &config) {
     if (!initialized_) {
         throw std::runtime_error("ChipWorker not initialized; call init() first");

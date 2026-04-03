@@ -18,6 +18,7 @@ Usage:
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     CONTINUOUS_TENSOR_MAX_DIMS,
+    DIST_SUB_MAILBOX_SIZE,
     ArgDirection,
     CallConfig,
     ChipCallable,
@@ -25,9 +26,18 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     ContinuousTensor,
     CoreCallable,
     DataType,
+    DistInputSpec,
+    DistOutputSpec,
+    DistSubmitOutput,
+    DistSubmitResult,
+    DistSubWorker,
+    DistWorker,
     DynamicTaskArgs,
     TaggedTaskArgs,
+    TaskState,
     TensorArgType,
+    WorkerPayload,
+    WorkerType,
     _ChipWorker,
     arg_direction_name,
     get_dtype_name,
@@ -53,6 +63,17 @@ __all__ = [
     "torch_dtype_to_datatype",
     "make_tensor_arg",
     "scalar_to_uint64",
+    # Distributed runtime
+    "WorkerType",
+    "TaskState",
+    "WorkerPayload",
+    "DistInputSpec",
+    "DistOutputSpec",
+    "DistSubmitOutput",
+    "DistSubmitResult",
+    "DistSubWorker",
+    "DistWorker",
+    "DIST_SUB_MAILBOX_SIZE",
 ]
 
 

@@ -33,6 +33,7 @@
 #include "callable.h"
 #include "chip_worker.h"
 #include "data_type.h"
+#include "dist_worker_bind.h"
 #include "task_args.h"
 #include "tensor_arg.h"
 
@@ -603,4 +604,6 @@ NB_MODULE(_task_interface, m) {
         .def("reset", &ChipWorker::reset)
         .def_prop_ro("device_id", &ChipWorker::device_id)
         .def_prop_ro("initialized", &ChipWorker::initialized);
+
+    bind_dist_worker(m);
 }

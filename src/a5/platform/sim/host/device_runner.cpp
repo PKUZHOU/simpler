@@ -94,7 +94,7 @@ bool create_temp_so_file(const std::string &path_template, const uint8_t *data, 
 // =============================================================================
 
 DeviceRunner &DeviceRunner::get() {
-    static DeviceRunner runner;
+    thread_local static DeviceRunner runner;
     return runner;
 }
 

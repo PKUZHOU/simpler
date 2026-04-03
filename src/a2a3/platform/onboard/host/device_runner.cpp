@@ -182,7 +182,7 @@ int AicpuSoInfo::finalize() {
 // =============================================================================
 
 DeviceRunner &DeviceRunner::get() {
-    static DeviceRunner runner;
+    thread_local static DeviceRunner runner;
     return runner;
 }
 
