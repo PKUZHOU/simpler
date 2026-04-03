@@ -36,7 +36,7 @@ int validate_runtime_impl(Runtime *runtime);
  * Internal device-memory functions (used via Runtime.host_api, NOT dlsym'd)
  * =========================================================================== */
 
-static void *device_malloc(size_t size) {
+void *device_malloc(size_t size) {
     try {
         return DeviceRunner::get().allocate_tensor(size);
     } catch (...) {
@@ -44,14 +44,14 @@ static void *device_malloc(size_t size) {
     }
 }
 
-static void device_free(void *dev_ptr) {
+void device_free(void *dev_ptr) {
     if (dev_ptr == NULL) return;
     try {
         DeviceRunner::get().free_tensor(dev_ptr);
     } catch (...) {}
 }
 
-static int copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
+int copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
     if (dev_ptr == NULL || host_ptr == NULL) return -1;
     try {
         return DeviceRunner::get().copy_to_device(dev_ptr, host_ptr, size);
@@ -60,7 +60,7 @@ static int copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
     }
 }
 
-static int copy_from_device(void *host_ptr, const void *dev_ptr, size_t size) {
+int copy_from_device(void *host_ptr, const void *dev_ptr, size_t size) {
     if (host_ptr == NULL || dev_ptr == NULL) return -1;
     try {
         return DeviceRunner::get().copy_from_device(host_ptr, dev_ptr, size);

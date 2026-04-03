@@ -68,22 +68,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     constexpr int kTotalElems = 128 * 128;
 
-    using FlatShape = Shape<1, 1, 1, 1, kTotalElems>;
-    using FlatStride = Stride<kTotalElems, kTotalElems, kTotalElems, kTotalElems, 1>;
-    using FlatGlobalData = GlobalTensor<float, FlatShape, FlatStride>;
-    FlatGlobalData outGlobalFlat(out_data);
+    using ShapeDyn = Shape<DYNAMIC, DYNAMIC, DYNAMIC, DYNAMIC, DYNAMIC>;
+    using StrideDyn = Stride<DYNAMIC, DYNAMIC, DYNAMIC, DYNAMIC, DYNAMIC>;
+    using FlatGlobalData = GlobalTensor<float, ShapeDyn, StrideDyn, Layout::ND>;
+    ShapeDyn shape(1, 1, 1, 1, kTotalElems);
+    StrideDyn stride(kTotalElems, kTotalElems, kTotalElems, kTotalElems, 1);
+    FlatGlobalData outGlobalFlat(out_data, shape, stride);
     __gm__ float* remote_in_data = CommRemotePtr(comm_ctx, in_data, peer_rank);
-    FlatGlobalData remoteInGlobalFlat(remote_in_data);
+    FlatGlobalData remoteInGlobalFlat(remote_in_data, shape, stride);
 
     using ScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, pto::comm::sdma::UB_ALIGN_SIZE>;
     ScratchTile scratchTile;
-    TASSIGN(scratchTile, 0x20000);
+    TASSIGN(scratchTile, 0x0);
 
     __gm__ uint8_t* context = reinterpret_cast<__gm__ uint8_t*>(static_cast<uintptr_t>(sdma_context));
+    pipe_barrier(PIPE_ALL);
+    pto::comm::AsyncSession session;
+    if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::SDMA>(scratchTile, context, session, 0)) {
+        pipe_barrier(PIPE_ALL);
+        return;
+    }
 
-    auto desc = pto2_sdma_tget_descriptor(outGlobalFlat, remoteInGlobalFlat, scratchTile, context);
-    uint64_t tag = pto2_send_request_entry(PTO2_ENGINE_SDMA, PTO2_SQ_ID_AUTO, desc);
-    pto2_save_expected_completion(PTO2_ENGINE_SDMA, cq, tag);
-
+    pto::comm::AsyncEvent event =
+        pto::comm::TGET_ASYNC<pto::comm::DmaEngine::SDMA>(outGlobalFlat, remoteInGlobalFlat, session);
+    if (event.valid()) {
+        pto2_save_expected_completion(cq, event);
+    }
     pto2_cq_flush(cq);
 }

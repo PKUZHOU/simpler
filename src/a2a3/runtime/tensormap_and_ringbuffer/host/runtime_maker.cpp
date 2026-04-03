@@ -39,6 +39,7 @@
 #include "../runtime/runtime.h"
 #include "callable.h"
 #include "common/platform_config.h"
+#include "task_args.h"
 #include "common/unified_log.h"
 
 #if __has_include("pto/npu/comm/async/sdma/sdma_workspace_manager.hpp") && __has_include("acl/acl.h")
@@ -105,15 +106,17 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
         for (int32_t i = 0; i < callable->child_count(); i++) {
             int func_id = callable->child_func_id(i);
             const auto &kernel = callable->child(i);
-            uint64_t addr = runtime->host_api.upload_kernel_binary(
+            uint64_t callable_addr = runtime->host_api.upload_kernel_binary(
                 func_id, reinterpret_cast<const uint8_t *>(&kernel),
                 CoreCallable::binary_data_offset() + kernel.binary_size()
             );
-            if (addr == 0) {
+            if (callable_addr == 0) {
                 LOG_ERROR("Failed to upload kernel binary for func_id=%d", func_id);
                 return -1;
             }
-            runtime->set_function_bin_addr(func_id, addr);
+            // RT2 dispatch payload stores the executable entry address, not the
+            // CoreCallable envelope base. AICore jumps to function_bin_addr directly.
+            runtime->set_function_bin_addr(func_id, callable_addr + CoreCallable::binary_data_offset());
         }
     }
 
@@ -283,7 +286,23 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
 
     // Set up device orchestration state
     runtime->set_orch_built_on_host(false);
-    runtime->set_orch_args(device_args);
+    uint64_t flat_args[RUNTIME_MAX_ARGS] = {};
+    int flat_arg_count = 0;
+    for (int i = 0; i < device_args.tensor_count(); i++) {
+        if (flat_arg_count >= RUNTIME_MAX_ARGS) {
+            LOG_ERROR("Too many flattened orchestration args (max=%d)", RUNTIME_MAX_ARGS);
+            return -1;
+        }
+        flat_args[flat_arg_count++] = device_args.tensor(i).data;
+    }
+    for (int i = 0; i < device_args.scalar_count(); i++) {
+        if (flat_arg_count >= RUNTIME_MAX_ARGS) {
+            LOG_ERROR("Too many flattened orchestration args (max=%d)", RUNTIME_MAX_ARGS);
+            return -1;
+        }
+        flat_args[flat_arg_count++] = device_args.scalar(i);
+    }
+    runtime->set_orch_args(flat_args, flat_arg_count);
 
     LOG_INFO("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
 

@@ -50,9 +50,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using TileData = Tile<TileType::Vec, float, kTRows_, kTCols_, BLayout::RowMajor, -1, -1>;
 
     TileData srcTile(vRows, vCols);
-    TileData dstTile(vRows, vCols);
     TASSIGN(srcTile, 0x0);
-    TASSIGN(dstTile, 0x10000);
 
     GlobalData srcGlobal(src);
     GlobalData dstGlobal(result);
@@ -62,11 +60,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
     float notify_value = static_cast<float>(*notify_counter);
-    TADDS(dstTile, srcTile, notify_value);
+    TADDS(srcTile, srcTile, notify_value);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
-    TSTORE(dstGlobal, dstTile);
+    TSTORE(dstGlobal, srcTile);
     set_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
     wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
 }

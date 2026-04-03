@@ -461,6 +461,9 @@ private:
     friend inline Tensor make_tensor_external(
         void *addr, const uint32_t shapes[], uint32_t ndims, DataType dtype, bool manual_dep, int32_t version
     );
+    friend inline Tensor make_tensor(
+        const uint32_t shapes[], uint32_t ndims, DataType dtype, bool manual_dep, int32_t version
+    );
 };
 
 static_assert(sizeof(Tensor) == 128, "Tensor must be exactly 2 cache lines (128 bytes)");

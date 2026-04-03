@@ -52,9 +52,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using TileData = Tile<TileType::Vec, float, kTRows_, kTCols_, BLayout::RowMajor, -1, -1>;
 
     TileData inTile(vRows, vCols);
-    TileData outTile(vRows, vCols);
     TASSIGN(inTile, 0x0);
-    TASSIGN(outTile, 0x10000);
 
     GlobalData inGlobal(in_data);
     GlobalData outGlobal(out_data);
@@ -64,11 +62,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
     // out = in + in = in * 2.0
-    TADD(outTile, inTile, inTile);
+    TADD(inTile, inTile, inTile);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
 
-    TSTORE(outGlobal, outTile);
+    TSTORE(outGlobal, inTile);
     set_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
     wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
 

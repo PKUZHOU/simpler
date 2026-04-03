@@ -60,8 +60,8 @@ enum PTO2RuntimeMode {
 typedef struct PTO2Runtime PTO2Runtime;  // forward declare for ops signatures
 
 struct PTO2RuntimeOps {
-    void (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
-                        const PTOParam& params);
+    TaskOutputTensors (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
+                                     const Arg& args);
     uint64_t (*get_async_context)(PTO2Runtime* rt, PTO2AsyncEngine engine);
     uint64_t (*alloc_cq)(PTO2Runtime* rt);
     void (*scope_begin)(PTO2Runtime* rt);

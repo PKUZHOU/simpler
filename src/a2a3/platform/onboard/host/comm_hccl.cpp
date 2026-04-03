@@ -311,14 +311,12 @@ extern "C" CommHandle comm_init(int rank, int nranks, int device_id, const char*
         return nullptr;
     }
 
-    if (rank == 0) {
-        int32_t rtRet = rtSetDevice(device_id);
-        if (rtRet != 0) {
-            fprintf(stderr, "[comm rank %d] rtSetDevice(%d) failed: %d\n",
-                    rank, device_id, rtRet);
-            delete h;
-            return nullptr;
-        }
+    int32_t rtRet = rtSetDevice(device_id);
+    if (rtRet != 0) {
+        fprintf(stderr, "[comm rank %d] rtSetDevice(%d) failed: %d\n",
+                rank, device_id, rtRet);
+        delete h;
+        return nullptr;
     }
 
     // HCCL requires an ACL runtime context bound to the physical device.

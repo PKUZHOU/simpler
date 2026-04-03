@@ -53,7 +53,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
     Tensor ext_result = make_tensor_external(result_ptr, shapes, 1, DataType::FLOAT32);
 
     // Producer: normal run-to-completion task (sends TNOTIFY to peer)
-    PTOParam params_producer;
+    Arg params_producer;
     params_producer.add_input(ext_in);
     params_producer.add_output(ext_out);
     params_producer.add_scalar((uint64_t)(uintptr_t)notify_counter_ptr);
@@ -66,7 +66,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
         2, (uint64_t)(uintptr_t)notify_counter_ptr, 1);
 
     // Consumer: depends on producer (via ext_out) and notify_wait (via token).
-    PTOParam params_consumer;
+    Arg params_consumer;
     params_consumer.add_input(notify_token);
     params_consumer.add_input(ext_out);
     params_consumer.add_output(ext_result);

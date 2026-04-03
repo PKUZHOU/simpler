@@ -73,14 +73,14 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
             return;
         }
 
-        PTOParam params_producer;
+        Arg params_producer;
         params_producer.add_input(ext_in);
         params_producer.add_output(ext_out);
         params_producer.add_scalar((uint64_t)(uintptr_t)comm_ctx);
         params_producer.add_scalar(sdma_context);
         pto2_rt_submit_aiv_task_deferred(2, params_producer, cq);
 
-        PTOParam params_consumer;
+        Arg params_consumer;
         params_consumer.add_input(ext_out);
         params_consumer.add_output(ext_result);
         pto2_rt_submit_aiv_task(1, params_consumer);
@@ -108,7 +108,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
 
     if (sdma_context != 0) {
         // HW mode: kernel issues async SDMA request and puts event.handle directly in CQ entry.
-        PTOParam params_producer;
+        Arg params_producer;
         params_producer.add_input(ext_in);
         params_producer.add_output(ext_out);
         params_producer.add_scalar(sdma_context);
@@ -116,7 +116,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
 
         LOG_INFO("async_demo: HW mode - submitted async SDMA producer (func_id=2) with CQ");
     } else {
-        PTOParam params_producer;
+        Arg params_producer;
         params_producer.add_input(ext_in);
         params_producer.add_output(ext_out);
         params_producer.add_scalar(event_handle_output_gm);
@@ -126,7 +126,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
     }
 
     // t1 (consumer): result = out + 1.0 — normal run-to-completion
-    PTOParam params_consumer;
+    Arg params_consumer;
     params_consumer.add_input(ext_out);
     params_consumer.add_output(ext_result);
     pto2_rt_submit_aiv_task(1, params_consumer);

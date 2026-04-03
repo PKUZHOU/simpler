@@ -79,6 +79,15 @@ int finalize_device(void);
  */
 void record_tensor_pair(RuntimeHandle runtime, void *host_ptr, void *dev_ptr, size_t size);
 
+/**
+ * Helper memory operations used by Python distributed workers.
+ * These are convenience exports layered over DeviceRunner.
+ */
+void *device_malloc(size_t size);
+void device_free(void *dev_ptr);
+int copy_to_device(void *dev_ptr, const void *host_ptr, size_t size);
+int copy_from_device(void *host_ptr, const void *dev_ptr, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

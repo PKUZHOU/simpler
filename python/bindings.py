@@ -106,40 +106,44 @@ class RuntimeLibraryLoader:
         self.lib.get_runtime_size.argtypes = []
         self.lib.get_runtime_size.restype = c_size_t
 
-        # init_runtime - placement new + register kernels + load SO + build runtime with orchestration
-        self.lib.init_runtime.argtypes = [
-            c_void_p,               # runtime
-            POINTER(c_uint8),       # orch_so_binary
-            c_size_t,               # orch_so_size
-            c_char_p,               # orch_func_name
-            POINTER(c_uint64),      # func_args
-            c_int,                  # func_args_count
-            POINTER(c_int),         # arg_types
-            POINTER(c_uint64),      # arg_sizes
-            POINTER(c_int),         # kernel_func_ids (array of func_ids)
-            POINTER(POINTER(c_uint8)),  # kernel_binaries (array of binary pointers)
-            POINTER(c_size_t),      # kernel_sizes (array of sizes)
-            c_int,                  # kernel_count
-        ]
-        self.lib.init_runtime.restype = c_int
+        self.has_legacy_runtime_api = all(
+            hasattr(self.lib, name) for name in ("init_runtime", "launch_runtime", "finalize_runtime")
+        )
+        if self.has_legacy_runtime_api:
+            # init_runtime - placement new + register kernels + load SO + build runtime with orchestration
+            self.lib.init_runtime.argtypes = [
+                c_void_p,               # runtime
+                POINTER(c_uint8),       # orch_so_binary
+                c_size_t,               # orch_so_size
+                c_char_p,               # orch_func_name
+                POINTER(c_uint64),      # func_args
+                c_int,                  # func_args_count
+                POINTER(c_int),         # arg_types
+                POINTER(c_uint64),      # arg_sizes
+                POINTER(c_int),         # kernel_func_ids (array of func_ids)
+                POINTER(POINTER(c_uint8)),  # kernel_binaries (array of binary pointers)
+                POINTER(c_size_t),      # kernel_sizes (array of sizes)
+                c_int,                  # kernel_count
+            ]
+            self.lib.init_runtime.restype = c_int
 
-        # launch_runtime - device init + execute runtime
-        self.lib.launch_runtime.argtypes = [
-            c_void_p,           # runtime
-            c_int,              # aicpu_thread_num
-            c_int,              # block_dim
-            c_int,              # device_id
-            POINTER(c_uint8),   # aicpu_binary
-            c_size_t,           # aicpu_size
-            POINTER(c_uint8),   # aicore_binary
-            c_size_t,           # aicore_size
-            c_int,              # orch_thread_num
-        ]
-        self.lib.launch_runtime.restype = c_int
+            # launch_runtime - device init + execute runtime
+            self.lib.launch_runtime.argtypes = [
+                c_void_p,           # runtime
+                c_int,              # aicpu_thread_num
+                c_int,              # block_dim
+                c_int,              # device_id
+                POINTER(c_uint8),   # aicpu_binary
+                c_size_t,           # aicpu_size
+                POINTER(c_uint8),   # aicore_binary
+                c_size_t,           # aicore_size
+                c_int,              # orch_thread_num
+            ]
+            self.lib.launch_runtime.restype = c_int
 
-        # finalize_runtime - validate + cleanup
-        self.lib.finalize_runtime.argtypes = [c_void_p]
-        self.lib.finalize_runtime.restype = c_int
+            # finalize_runtime - validate + cleanup
+            self.lib.finalize_runtime.argtypes = [c_void_p]
+            self.lib.finalize_runtime.restype = c_int
 
         # Note: register_kernel has been internalized into init_runtime
         # Kernel binaries are now passed directly to init_runtime()
@@ -169,16 +173,19 @@ class RuntimeLibraryLoader:
         self.lib.record_tensor_pair.restype = None
 
         # get_incore_compiler - get toolchain for incore kernel compilation
-        self.lib.get_incore_compiler.argtypes = []
-        self.lib.get_incore_compiler.restype = c_int
+        if hasattr(self.lib, "get_incore_compiler"):
+            self.lib.get_incore_compiler.argtypes = []
+            self.lib.get_incore_compiler.restype = c_int
 
         # get_orchestration_compiler - get toolchain for orchestration compilation
-        self.lib.get_orchestration_compiler.argtypes = []
-        self.lib.get_orchestration_compiler.restype = c_int
+        if hasattr(self.lib, "get_orchestration_compiler"):
+            self.lib.get_orchestration_compiler.argtypes = []
+            self.lib.get_orchestration_compiler.restype = c_int
 
         # enable_runtime_profiling - enable profiling for swimlane
-        self.lib.enable_runtime_profiling.argtypes = [c_void_p, c_int]
-        self.lib.enable_runtime_profiling.restype = c_int
+        if hasattr(self.lib, "enable_runtime_profiling"):
+            self.lib.enable_runtime_profiling.argtypes = [c_void_p, c_int]
+            self.lib.enable_runtime_profiling.restype = c_int
 
         # --- Distributed communication API (comm_*) ---
         self.lib.comm_init.argtypes = [c_int, c_int, c_int, c_char_p]
@@ -260,6 +267,8 @@ class Runtime:
         Raises:
             RuntimeError: If initialization fails
         """
+        if not getattr(self.lib, "init_runtime", None):
+            raise RuntimeError("Loaded host runtime does not export legacy init_runtime() API")
 
         func_args = func_args or []
         func_args_count = len(func_args)
@@ -338,6 +347,8 @@ class Runtime:
         Raises:
             RuntimeError: If finalization fails
         """
+        if not getattr(self.lib, "finalize_runtime", None):
+            raise RuntimeError("Loaded host runtime does not export legacy finalize_runtime() API")
 
         rc = self.lib.finalize_runtime(self._handle)
         if rc != 0:
@@ -518,6 +529,8 @@ def launch_runtime(
     global _lib
     if _lib is None:
         raise RuntimeError("Runtime not loaded. Call bind_host_binary() first.")
+    if not getattr(_lib, "launch_runtime", None):
+        raise RuntimeError("Loaded host runtime does not export legacy launch_runtime() API")
 
     # Convert bytes to ctypes arrays
     aicpu_array = (c_uint8 * len(aicpu_binary)).from_buffer_copy(aicpu_binary)

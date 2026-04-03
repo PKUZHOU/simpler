@@ -69,6 +69,7 @@ class DistributedCodeRunner:
     ):
         self.kernels_dir = Path(kernels_dir).resolve()
         self.platform = platform
+        os.environ["PTO_PLATFORM"] = self.platform
         self.build_dir = Path(build_dir).resolve() if build_dir else \
             SIMPLER_ROOT / "build" / "distributed" / "cache"
         self.artifact_dir = Path(artifact_dir).resolve() if artifact_dir else \
@@ -156,6 +157,7 @@ class DistributedCodeRunner:
         from runtime_builder import RuntimeBuilder
         from elf_parser import extract_text_section
         from code_runner import _ensure_pto_isa_root
+        from kernel_compiler import KernelCompiler
 
         pto_isa_root = _ensure_pto_isa_root(
             verbose=True, commit=self.pto_isa_commit,
@@ -163,13 +165,25 @@ class DistributedCodeRunner:
         if pto_isa_root is None:
             raise EnvironmentError("PTO_ISA_ROOT could not be resolved.")
 
+        dist_config = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})
+        configured_pto_isa_root = dist_config.get("pto_isa_root")
+        if configured_pto_isa_root:
+            configured_pto_isa_root = Path(configured_pto_isa_root)
+            if not configured_pto_isa_root.is_absolute():
+                configured_pto_isa_root = (SIMPLER_ROOT / configured_pto_isa_root).resolve()
+            if configured_pto_isa_root.is_dir():
+                pto_isa_root = str(configured_pto_isa_root)
+                logger.info(f"Using configured PTO-ISA root: {pto_isa_root}")
+
         runtime_name = self.kcfg.RUNTIME_CONFIG.get("runtime", "host_build_graph")
         builder = RuntimeBuilder(platform=self.platform)
-        kernel_compiler = builder.get_kernel_compiler()
+        kernel_compiler = KernelCompiler(platform=self.platform)
 
         logger.info("=== Phase 1: Building runtime ===")
-        host_binary, aicpu_binary, aicore_binary = builder.build(
-            runtime_name, str(self.build_dir))
+        runtime_binaries = builder.get_binaries(runtime_name, build=True)
+        host_binary = runtime_binaries.host_path.read_bytes()
+        aicpu_binary = runtime_binaries.aicpu_path.read_bytes()
+        aicore_binary = runtime_binaries.aicore_path.read_bytes()
 
         logger.info("=== Phase 2: Compiling orchestration ===")
         orch_source = self.kcfg.ORCHESTRATION["source"]
@@ -186,11 +200,21 @@ class DistributedCodeRunner:
         else:
             arch = "a2a3"
 
-        runtime_include_dirs = [
-            str(SIMPLER_ROOT / "src" / arch / "runtime" / runtime_name / "runtime")
-        ]
+        runtime_base_dir = SIMPLER_ROOT / "src" / arch / "runtime" / runtime_name
+        build_config_path = runtime_base_dir / "build_config.py"
+        runtime_include_dirs = []
+        if build_config_path.is_file():
+            spec = importlib.util.spec_from_file_location("build_config", build_config_path)
+            assert spec is not None and spec.loader is not None
+            bc_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(bc_module)
+            aicore_cfg = bc_module.BUILD_CONFIG.get("aicore", {})
+            for path in aicore_cfg.get("include_dirs", []):
+                runtime_include_dirs.append(str(runtime_base_dir / path))
+        else:
+            runtime_include_dirs.append(str(runtime_base_dir / "runtime"))
+        runtime_include_dirs.append(str(SIMPLER_ROOT / "src" / "common" / "task_interface"))
 
-        dist_config = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})
         extra_includes = list(runtime_include_dirs) + [
             str(SIMPLER_ROOT / "src" / arch / "platform" / "include"),
         ]

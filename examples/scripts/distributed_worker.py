@@ -96,19 +96,16 @@ def main():
     # 1. Load library
     # ----------------------------------------------------------------
     from bindings import (
-        bind_host_binary, set_device, launch_runtime,
+        bind_host_binary, set_device,
         device_malloc, device_free, copy_to_device, copy_from_device,
         comm_init, comm_alloc_windows, comm_get_local_window_base,
         comm_barrier, comm_destroy,
-        ARG_SCALAR, ARG_INPUT_PTR, ARG_OUTPUT_PTR, ARG_INOUT_PTR,
     )
+    from task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, ChipWorker, CoreCallable
 
     lib_path = artifact_dir / "libhost_runtime.so"
-    Runtime = bind_host_binary(str(lib_path))
+    bind_host_binary(str(lib_path))
     sys.stderr.write(f"[rank {args.rank}] Library loaded\n")
-
-    set_device(args.device_id)
-    sys.stderr.write(f"[rank {args.rank}] Device {args.device_id} set for runtime\n")
 
     # ----------------------------------------------------------------
     # 2. Comm init + alloc windows
@@ -124,6 +121,9 @@ def main():
     local_base = comm_get_local_window_base(comm)
 
     sys.stderr.write(f"[rank {args.rank}] Comm initialized, local_base=0x{local_base:x}\n")
+
+    set_device(args.device_id)
+    sys.stderr.write(f"[rank {args.rank}] Device {args.device_id} set for runtime\n")
 
     # ----------------------------------------------------------------
     # 3. Allocate buffers
@@ -184,8 +184,6 @@ def main():
         kernel_binaries.append((k["func_id"], data))
 
     func_args = []
-    arg_types = []
-    arg_sizes = []
     for tok in args.args:
         if tok == "nranks":
             func_args.append(args.nranks)
@@ -199,38 +197,35 @@ def main():
                 sys.stderr.write(f"[rank {args.rank}] --arg: unknown token '{tok}'\n")
                 return 1
             func_args.append(b["dev_ptr"])
-        # In distributed mode, all memory is pre-allocated by the worker
-        # (RDMA windows / device_malloc). Pass everything as scalar so
-        # the runtime doesn't try to re-allocate or copy.
-        arg_types.append(ARG_SCALAR)
-        arg_sizes.append(0)
 
     sys.stderr.write(
         f"[rank {args.rank}] Launching kernel: {len(func_args)} args, "
         f"{len(kernel_binaries)} kernels\n"
     )
 
-    runtime = Runtime()
-    runtime.initialize(
-        orch_binary,
-        args.orch_func,
-        func_args,
-        arg_types=arg_types,
-        arg_sizes=arg_sizes,
-        kernel_binaries=kernel_binaries,
+    core_children = []
+    for func_id, binary in kernel_binaries:
+        core_children.append((func_id, CoreCallable.build(signature=[], binary=binary)))
+    chip_callable = ChipCallable.build(
+        signature=[],
+        func_name=args.orch_func,
+        binary=orch_binary,
+        children=core_children,
     )
 
-    launch_runtime(
-        runtime,
-        aicpu_thread_num=args.aicpu_thread_num,
-        block_dim=args.block_dim,
-        device_id=args.device_id,
-        aicpu_binary=aicpu_binary,
-        aicore_binary=aicore_binary,
-        orch_thread_num=args.orch_thread_num,
-    )
+    orch_args = ChipStorageTaskArgs()
+    for value in func_args:
+        orch_args.add_scalar(value)
 
-    runtime.finalize()
+    worker = ChipWorker()
+    worker.init(args.device_id, lib_path, aicpu_binary, aicore_binary)
+
+    config = CallConfig()
+    config.block_dim = args.block_dim
+    config.aicpu_thread_num = args.aicpu_thread_num
+    config.orch_thread_num = args.orch_thread_num
+    worker.run(chip_callable, orch_args, config)
+    worker.reset()
     sys.stderr.write(f"[rank {args.rank}] Kernel execution complete\n")
 
     # ----------------------------------------------------------------

@@ -27,10 +27,9 @@ void pto2_set_orch_thread_idx(int idx) {
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
 // =============================================================================
 
-static void submit_task_impl(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
-                             const PTOParam& params) {
-    pto2_submit_mixed_task(&rt->orchestrators[pto2_current_orch_idx], mixed_kernels,
-                           params);
+static TaskOutputTensors submit_task_impl(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
+                                          const Arg& args) {
+    return pto2_submit_mixed_task(&rt->orchestrators[pto2_current_orch_idx], mixed_kernels, args);
 }
 
 static uint64_t get_async_context_impl(PTO2Runtime* rt, PTO2AsyncEngine engine) {
@@ -137,7 +136,7 @@ PTO2Runtime* pto2_runtime_create_custom(PTO2RuntimeMode mode,
     }
 
     // Initialize scheduler (heap_size = per-ring heap size)
-    if (!pto2_scheduler_init(&rt->scheduler, rt->sm_handle, rt->gm_heap, heap_size)) {
+    if (!pto2_scheduler_init(&rt->scheduler, rt->sm_handle)) {
         pto2_orchestrator_destroy(&rt->orchestrators[0]);
         free(rt->gm_heap);
         pto2_sm_destroy(rt->sm_handle);
@@ -191,7 +190,7 @@ PTO2Runtime* pto2_runtime_create_from_sm(PTO2RuntimeMode mode,
     }
 
     // Initialize scheduler (heap_size = per-ring heap size)
-    if (!pto2_scheduler_init(&rt->scheduler, rt->sm_handle, rt->gm_heap, heap_size)) {
+    if (!pto2_scheduler_init(&rt->scheduler, rt->sm_handle)) {
         for (int i = 0; i < orch_count; i++) {
             pto2_orchestrator_destroy(&rt->orchestrators[i]);
         }

@@ -23,7 +23,7 @@
 
 // Type headers needed by orchestration
 #include "tensor.h"             // Tensor
-#include "pto_types.h"          // PTOParam, PTOTensorEntry, PTOParamType, PTO2AsyncEngine
+#include "pto_types.h"          // Arg, TaskOutputTensors, PTO2AsyncEngine
 #include "pto_submit_types.h"   // MixedKernels, INVALID_KERNEL_ID, subtask slots
 
 // =============================================================================
@@ -33,7 +33,7 @@
 /**
  * Create a Tensor for pre-allocated external memory.
  */
-static inline Tensor make_tensor_external(void* addr,
+inline Tensor make_tensor_external(void* addr,
     const uint32_t shapes[],
     uint32_t ndims,
     DataType dtype = DataType::FLOAT32,
@@ -54,7 +54,7 @@ static inline Tensor make_tensor_external(void* addr,
  * The runtime allocates from the heap ring and fills buffer.addr during pto2_submit_task
  * when this tensor is passed as OUTPUT param. No buffer content is ever copied.
  */
-static inline Tensor make_tensor(const uint32_t shapes[],
+inline Tensor make_tensor(const uint32_t shapes[],
     uint32_t ndims,
     DataType dtype = DataType::FLOAT32,
     bool manual_dep = false,
@@ -102,8 +102,8 @@ void pto2_framework_bind_runtime(PTO2Runtime* rt);
  * Populated by the runtime; called by orchestration through inline wrappers.
  */
 typedef struct PTO2RuntimeOps {
-    void (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
-                        const PTOParam& params);
+    TaskOutputTensors (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
+                                     const Arg& args);
     uint64_t (*get_async_context)(PTO2Runtime* rt, PTO2AsyncEngine engine);
     uint64_t (*alloc_cq)(PTO2Runtime* rt);
     void (*scope_begin)(PTO2Runtime* rt);
@@ -138,30 +138,30 @@ static inline PTO2Runtime* pto2_current_runtime() {
     return pto2_framework_current_runtime();
 }
 
-static inline void pto2_rt_submit_task(const MixedKernels& mixed_kernels,
-                                       const PTOParam& params) {
+static inline TaskOutputTensors pto2_rt_submit_task(const MixedKernels& mixed_kernels,
+                                                    const Arg& args) {
     PTO2Runtime* rt = pto2_current_runtime();
-    rt->ops->submit_task(rt, mixed_kernels, params);
+    return rt->ops->submit_task(rt, mixed_kernels, args);
 }
 
 /**
  * Convenience wrapper: submit an AIC-only task.
  */
-static inline void pto2_rt_submit_aic_task(int32_t kernel_id, const PTOParam& params) {
+static inline TaskOutputTensors pto2_rt_submit_aic_task(int32_t kernel_id, const Arg& args) {
     PTO2Runtime* rt = pto2_current_runtime();
     MixedKernels mk;
     mk.aic_kernel_id = kernel_id;
-    rt->ops->submit_task(rt, mk, params);
+    return rt->ops->submit_task(rt, mk, args);
 }
 
 /**
  * Convenience wrapper: submit an AIV-only task (uses AIV0 slot).
  */
-static inline void pto2_rt_submit_aiv_task(int32_t kernel_id, const PTOParam& params) {
+static inline TaskOutputTensors pto2_rt_submit_aiv_task(int32_t kernel_id, const Arg& args) {
     PTO2Runtime* rt = pto2_current_runtime();
     MixedKernels mk;
     mk.aiv0_kernel_id = kernel_id;
-    rt->ops->submit_task(rt, mk, params);
+    return rt->ops->submit_task(rt, mk, args);
 }
 static inline uint64_t pto2_rt_get_async_context(PTO2AsyncEngine engine) {
     PTO2Runtime* rt = pto2_current_runtime();
@@ -207,50 +207,50 @@ static inline uint64_t pto2_rt_alloc_cq(PTO2Runtime* rt) {
  * The CQ address is automatically appended as the last scalar
  * so the kernel can access it from args[].
  */
-static inline void pto2_rt_submit_aiv_task_deferred(int32_t kernel_id,
-                                                     PTOParam& params,
-                                                     uint64_t cq_addr) {
+static inline TaskOutputTensors pto2_rt_submit_aiv_task_deferred(int32_t kernel_id,
+                                                                 Arg& args,
+                                                                 uint64_t cq_addr) {
     PTO2Runtime* rt = pto2_current_runtime();
-    params.complete_in_future = true;
-    params.cq_addr = cq_addr;
-    params.add_scalar(cq_addr);
+    args.complete_in_future = true;
+    args.cq_addr = cq_addr;
+    args.add_scalar(cq_addr);
     MixedKernels mk;
     mk.aiv0_kernel_id = kernel_id;
-    rt->ops->submit_task(rt, mk, params);
+    return rt->ops->submit_task(rt, mk, args);
 }
 
-static inline void pto2_rt_submit_aiv_task_deferred(PTO2Runtime* rt,
-                                                     int32_t kernel_id,
-                                                     PTOParam& params,
-                                                     uint64_t cq_addr) {
-    params.complete_in_future = true;
-    params.cq_addr = cq_addr;
-    params.add_scalar(cq_addr);
+static inline TaskOutputTensors pto2_rt_submit_aiv_task_deferred(PTO2Runtime* rt,
+                                                                 int32_t kernel_id,
+                                                                 Arg& args,
+                                                                 uint64_t cq_addr) {
+    args.complete_in_future = true;
+    args.cq_addr = cq_addr;
+    args.add_scalar(cq_addr);
     MixedKernels mk;
     mk.aiv0_kernel_id = kernel_id;
-    rt->ops->submit_task(rt, mk, params);
+    return rt->ops->submit_task(rt, mk, args);
 }
 
-static inline void pto2_rt_submit_aic_task_deferred(int32_t kernel_id,
-                                                     PTOParam& params,
-                                                     uint64_t cq_addr) {
+static inline TaskOutputTensors pto2_rt_submit_aic_task_deferred(int32_t kernel_id,
+                                                                 Arg& args,
+                                                                 uint64_t cq_addr) {
     PTO2Runtime* rt = pto2_current_runtime();
-    params.complete_in_future = true;
-    params.cq_addr = cq_addr;
-    params.add_scalar(cq_addr);
+    args.complete_in_future = true;
+    args.cq_addr = cq_addr;
+    args.add_scalar(cq_addr);
     MixedKernels mk;
     mk.aic_kernel_id = kernel_id;
-    rt->ops->submit_task(rt, mk, params);
+    return rt->ops->submit_task(rt, mk, args);
 }
 
-static inline void pto2_rt_submit_task_deferred(const MixedKernels& mixed_kernels,
-                                                 PTOParam& params,
-                                                 uint64_t cq_addr) {
+static inline TaskOutputTensors pto2_rt_submit_task_deferred(const MixedKernels& mixed_kernels,
+                                                             Arg& args,
+                                                             uint64_t cq_addr) {
     PTO2Runtime* rt = pto2_current_runtime();
-    params.complete_in_future = true;
-    params.cq_addr = cq_addr;
-    params.add_scalar(cq_addr);
-    rt->ops->submit_task(rt, mixed_kernels, params);
+    args.complete_in_future = true;
+    args.cq_addr = cq_addr;
+    args.add_scalar(cq_addr);
+    return rt->ops->submit_task(rt, mixed_kernels, args);
 }
 
 /**
@@ -276,15 +276,15 @@ static inline Tensor pto2_rt_submit_notification_wait_task(
     uint64_t cq_addr = pto2_rt_alloc_cq();
 
     uint32_t dummy_shape[1] = { 1 };
-    Tensor token = make_tensor(dummy_shape, 1, DataType::INT32);
+    TensorCreateInfo token_ci(dummy_shape, 1, DataType::INT32);
 
-    PTOParam params;
-    params.add_output(token);
-    params.add_scalar(counter_addr);
-    params.add_scalar(static_cast<uint64_t>(expected_value));
-    pto2_rt_submit_aiv_task_deferred(kernel_id, params, cq_addr);
+    Arg args;
+    args.add_output(token_ci);
+    args.add_scalar(counter_addr);
+    args.add_scalar(static_cast<uint64_t>(expected_value));
+    TaskOutputTensors outs = pto2_rt_submit_aiv_task_deferred(kernel_id, args, cq_addr);
 
-    return token;
+    return outs.get_ref(0);
 }
 
 static inline void pto2_rt_scope_begin() {

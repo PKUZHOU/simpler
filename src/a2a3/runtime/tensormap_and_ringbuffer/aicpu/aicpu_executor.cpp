@@ -188,16 +188,11 @@ public:
 
     BitStates get_valid_cluster_offset_states(PTO2ResourceShape shape) const {
         switch (shape) {
-            case PTO2ResourceShape::AIC_ONLY:
+            case PTO2ResourceShape::AIC:
                 return core_states_ & aic_mask_;
-            case PTO2ResourceShape::AIV_X1:
+            case PTO2ResourceShape::AIV:
                 return (((core_states_ & aiv_mask_) >> 1) | ((core_states_ & aiv_mask_) >> 2)) & aic_mask_;
-            case PTO2ResourceShape::AIV_X2:
-                return (((core_states_ & aiv_mask_) >> 1) & ((core_states_ & aiv_mask_) >> 2)) & aic_mask_;
-            case PTO2ResourceShape::AIC_AIV_X1:
-                return (((core_states_ & aiv_mask_) >> 1) | ((core_states_ & aiv_mask_) >> 2)) & core_states_ &
-                       aic_mask_;
-            case PTO2ResourceShape::AIC_AIV_X2:
+            case PTO2ResourceShape::MIX:
                 return (((core_states_ & aiv_mask_) >> 1) & ((core_states_ & aiv_mask_) >> 2)) & core_states_ &
                        aic_mask_;
         }
@@ -392,11 +387,10 @@ struct AicpuExecutor {
 
             if (done) {
                 executing_reg_task_ids_[core_id] = AICPU_TASK_INVALID;
-                PTO2SubtaskSlot subslot = executing_subslot_by_core_[core_id];
                 PTO2TaskSlotState& slot_state = *executing_slot_state_by_core_[core_id];
 
                 // Two-stage completion: mark subtask done, then handle mixed-task completion
-                bool mixed_complete = rt->scheduler.on_subtask_complete(slot_state, subslot);
+                bool mixed_complete = rt->scheduler.on_subtask_complete(slot_state);
                 if (mixed_complete) {
                     int32_t registration_error = PTO2_ERROR_NONE;
                     if (async_wait_list.register_deferred(slot_state, thread_idx,
@@ -460,22 +454,24 @@ struct AicpuExecutor {
                             int32_t perf_slot_idx = static_cast<int32_t>(executing_subslot_by_core_[core_id]);
                             record->func_id = slot_state.task->kernel_id[perf_slot_idx];
                             record->core_type = CT;
-                            perf_aicpu_record_dispatch_and_finish_time(
-                                record, dispatch_timestamps_[core_id], finish_ts);
-
-                            // Fill ring_id from slot state
-                            record->ring_id = slot_state.ring_id;
-
-                            // Fill fanout from slot_state's dependency linked list.
-                            // No lock: head-insert guarantees existing nodes' next pointers
-                            // are stable, so this snapshot is consistent (best-effort).
-                            record->fanout_count = 0;
+                            uint64_t fanout[RUNTIME_MAX_FANOUT] = {};
+                            int32_t fanout_count = 0;
                             PTO2DepListEntry* cur = slot_state.fanout_head;
-                            while (cur != nullptr && record->fanout_count < RUNTIME_MAX_FANOUT) {
-                                record->fanout[record->fanout_count++] = static_cast<int32_t>(
-                                    cur->slot_state->task->mixed_task_id.local());
+                            while (cur != nullptr && fanout_count < RUNTIME_MAX_FANOUT) {
+                                fanout[fanout_count++] = cur->slot_state->task->mixed_task_id.raw;
                                 cur = cur->next;
                             }
+                            perf_aicpu_complete_record(
+                                perf_buf,
+                                static_cast<uint32_t>(expected_reg_task_id),
+                                slot_state.task->mixed_task_id.raw,
+                                static_cast<uint32_t>(record->func_id),
+                                CT,
+                                dispatch_timestamps_[core_id],
+                                finish_ts,
+                                fanout_count > 0 ? fanout : nullptr,
+                                fanout_count
+                            );
                         }
                     }
 #if PTO2_SCHED_PROFILING
@@ -501,11 +497,9 @@ struct AicpuExecutor {
 
     static const char* shape_name(PTO2ResourceShape shape) {
         switch (shape) {
-        case PTO2ResourceShape::AIC_ONLY:   return "AIC_ONLY";
-        case PTO2ResourceShape::AIV_X1:     return "AIV_X1";
-        case PTO2ResourceShape::AIV_X2:     return "AIV_X2";
-        case PTO2ResourceShape::AIC_AIV_X1: return "AIC_AIV_X1";
-        case PTO2ResourceShape::AIC_AIV_X2: return "AIC_AIV_X2";
+        case PTO2ResourceShape::AIC: return "AIC";
+        case PTO2ResourceShape::AIV: return "AIV";
+        case PTO2ResourceShape::MIX: return "MIX";
         }
         return "UNKNOWN";
     }
@@ -517,11 +511,9 @@ struct AicpuExecutor {
 
     static constexpr ResourceCount shape_resource_count(PTO2ResourceShape shape) {
         constexpr ResourceCount kTable[PTO2_NUM_RESOURCE_SHAPES] = {
-            {1, 0},  // AIC_ONLY    = 0
-            {0, 1},  // AIV_X1      = 1
-            {0, 2},  // AIV_X2      = 2
-            {1, 1},  // AIC_AIV_X1  = 3
-            {1, 2},  // AIC_AIV_X2  = 4
+            {1, 0},
+            {0, 1},
+            {1, 2},
         };
         return kTable[static_cast<int>(shape)];
     }
@@ -533,21 +525,15 @@ struct AicpuExecutor {
      * to reduce contention on the same ready queue across adjacent threads.
      */
     static const PTO2ResourceShape* get_dispatch_order(int32_t thread_idx) {
-        // Even threads: AIC-first fallback after widest
         static constexpr PTO2ResourceShape kEvenOrder[PTO2_NUM_RESOURCE_SHAPES] = {
-            PTO2ResourceShape::AIC_AIV_X2,
-            PTO2ResourceShape::AIC_AIV_X1,
-            PTO2ResourceShape::AIC_ONLY,
-            PTO2ResourceShape::AIV_X2,
-            PTO2ResourceShape::AIV_X1,
+            PTO2ResourceShape::MIX,
+            PTO2ResourceShape::AIC,
+            PTO2ResourceShape::AIV,
         };
-        // Odd threads: AIV-first fallback after widest
         static constexpr PTO2ResourceShape kOddOrder[PTO2_NUM_RESOURCE_SHAPES] = {
-            PTO2ResourceShape::AIC_AIV_X2,
-            PTO2ResourceShape::AIV_X2,
-            PTO2ResourceShape::AIC_AIV_X1,
-            PTO2ResourceShape::AIV_X1,
-            PTO2ResourceShape::AIC_ONLY,
+            PTO2ResourceShape::MIX,
+            PTO2ResourceShape::AIV,
+            PTO2ResourceShape::AIC,
         };
         return (thread_idx % 2 == 0) ? kEvenOrder : kOddOrder;
     }
@@ -567,11 +553,16 @@ struct AicpuExecutor {
 #if PTO2_SCHED_PROFILING
         extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_wait_cycle[];
         uint64_t t_pop_start = get_sys_cnt_aicpu();
-        PTO2TaskSlotState* slot_state = rt->scheduler.get_ready_task(
-            shape, local_buf, g_sched_pop_atomic_count[thread_idx], g_sched_pop_wait_cycle[thread_idx], local_dispatch_count);
+        PTO2TaskSlotState* ready_tasks[1] = {nullptr};
+        int count = rt->scheduler.get_ready_tasks_batch(
+            shape, local_buf, ready_tasks, 1,
+            g_sched_pop_atomic_count[thread_idx], g_sched_pop_wait_cycle[thread_idx], local_dispatch_count);
+        PTO2TaskSlotState* slot_state = count > 0 ? ready_tasks[0] : nullptr;
         sched_dispatch_pop_cycle += (get_sys_cnt_aicpu() - t_pop_start);
 #else
-        PTO2TaskSlotState* slot_state = rt->scheduler.get_ready_task(shape, local_buf);
+        PTO2TaskSlotState* ready_tasks[1] = {nullptr};
+        int count = rt->scheduler.get_ready_tasks_batch(shape, local_buf, ready_tasks, 1);
+        PTO2TaskSlotState* slot_state = count > 0 ? ready_tasks[0] : nullptr;
 #endif
         if (slot_state) {
 #if PTO2_SCHED_PROFILING
@@ -604,7 +595,7 @@ struct AicpuExecutor {
         PTO2DispatchPayload& payload = s_pto2_payload_per_core[core_id];
         int32_t slot_idx = static_cast<int32_t>(subslot);
         payload.function_bin_addr = get_function_bin_addr(slot_state.task->kernel_id[slot_idx]);
-        payload.args = slot_state.payload->dispatch_args;
+        memcpy(payload.args, slot_state.payload->dispatch_args, sizeof(slot_state.payload->dispatch_args));
         executing_subslot_by_core_[core_id] = subslot;
         executing_slot_state_by_core_[core_id] = &slot_state;
 #if PTO2_PROFILING
@@ -2244,16 +2235,13 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int32_t thread_idx,
     DEV_ALWAYS("Progress: %d/%d tasks (%.1f%%)",
              completed, total, total > 0 ? completed * 100.0 / total : 0.0);
 
-    uint64_t aic_ready = 0, aiv_ready = 0, aiv_x2_ready = 0, mixed_x1_ready = 0, mixed_x2_ready = 0;
+    uint64_t aic_ready = 0, aiv_ready = 0, mixed_ready = 0;
     if (rt) {
-        aic_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIC_ONLY)].size();
-        aiv_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIV_X1)].size();
-        aiv_x2_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIV_X2)].size();
-        mixed_x1_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIC_AIV_X1)].size();
-        mixed_x2_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIC_AIV_X2)].size();
+        aic_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIC)].size();
+        aiv_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIV)].size();
+        mixed_ready = sched->ready_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size();
     }
-    DEV_ALWAYS("Ready Queues: AIC=%lu, AIV=%lu, AIV_X2=%lu, AIC_AIV_X1=%lu, AIC_AIV_X2=%lu",
-               aic_ready, aiv_ready, aiv_x2_ready, mixed_x1_ready, mixed_x2_ready);
+    DEV_ALWAYS("Ready Queues: AIC=%lu, AIV=%lu, MIX=%lu", aic_ready, aiv_ready, mixed_ready);
 
     int32_t busy_cores = 0;
     int32_t idle_cores = 0;

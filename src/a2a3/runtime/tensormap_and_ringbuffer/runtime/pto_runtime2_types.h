@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "pto_task_id.h"
 #include "pto_types.h"
 #include "pto_submit_types.h"
 #include "pto2_dispatch_payload.h"
@@ -65,7 +66,9 @@
 #define PTO2_ERROR_HEAP_RING_DEADLOCK         2
 #define PTO2_ERROR_FLOW_CONTROL_DEADLOCK      3
 #define PTO2_ERROR_DEP_POOL_OVERFLOW          4
-#define PTO2_ERROR_INVALID_PARAM              5   // PTOParam construction error (invalid params)
+#define PTO2_ERROR_INVALID_PARAM              5   // Arg construction error (invalid args)
+#define PTO2_ERROR_INVALID_ARGS               PTO2_ERROR_INVALID_PARAM
+#define PTO2_ERROR_DEPENDENCY_OVERFLOW        6   // Too many unique fanin dependencies for one task
 
 // Scheduler errors (100+): detected in scheduler threads
 #define PTO2_ERROR_SCHEDULER_TIMEOUT          100
@@ -114,31 +117,8 @@
 // Multi-Ring task_id Encoding
 // =============================================================================
 
-/**
- * TaskId: 64-bit encoding used across Runtime2.
- *
- * raw encoding: (ring_id << 32) | local_id
- *
- * ring_id:  which ring layer (0..PTO2_MAX_RING_DEPTH-1)
- * local_id: per-ring monotonic counter
- */
-struct PTO2TaskId {
-    uint64_t raw;
-
-    constexpr PTO2TaskId() : raw(0) {}
-    constexpr explicit PTO2TaskId(uint64_t v) : raw(v) {}
-
-    constexpr uint8_t ring() const { return static_cast<uint8_t>(raw >> 32); }
-    constexpr uint32_t local() const { return static_cast<uint32_t>(raw & 0xFFFFFFFFu); }
-
-    constexpr bool operator==(const PTO2TaskId& other) const { return raw == other.raw; }
-    constexpr bool operator!=(const PTO2TaskId& other) const { return raw != other.raw; }
-};
-
-static_assert(sizeof(PTO2TaskId) == 8, "PTO2TaskId must stay 8 bytes (shared memory ABI)");
-
 static inline PTO2TaskId pto2_make_task_id(uint8_t ring_id, uint32_t local_id) {
-    return PTO2TaskId{(static_cast<uint64_t>(ring_id) << 32) | static_cast<uint64_t>(local_id)};
+    return PTO2TaskId::make(ring_id, local_id);
 }
 
 // =============================================================================
@@ -367,36 +347,38 @@ struct PTO2TaskPayload {
     uint64_t cq_addr{0};                       // CQ model: completion queue address for kernel to write
     PTO2TaskSlotState* fanin_slot_states[PTO2_MAX_INPUTS]; // Producer slot states (used by on_task_release)
     // === Tensors (2048B) — alignas(64) Tensor forces alignment ===
-    Tensor tensors[PTO2_MAX_TENSOR_PARAMS];
+    Tensor tensors[MAX_TENSOR_ARGS];
     // === Pre-built args for AICore dispatch (1152B = 16 tensor ptrs + 128 scalars) ===
     uint64_t dispatch_args[PTO2_DISPATCH_MAX_ARGS];
 
     /**
      * Initialize payload: copy tensors, build dispatch args.
      *
-     * @param params            Task parameters (tensors + scalars)
+     * @param args              Task arguments (tensors + scalars)
      */
-    void init(const PTOParam& params) {
-        tensor_count = params.tensor_count;
-        scalar_count = params.scalar_count;
-        complete_in_future = params.complete_in_future;
-        cq_addr = params.cq_addr;
+    void init(const Arg& args, TaskOutputTensors& result, void* base_addr, uint64_t offsets[], uint64_t buffer_sizes[]) {
+        tensor_count = args.tensor_count();
+        scalar_count = args.scalar_count();
+        complete_in_future = args.complete_in_future;
+        cq_addr = args.cq_addr;
 
-        // 1. Copy tensors from PTOParam
-        auto src_tensors = params.tensors;
-        for (int32_t i = 0; i < params.tensor_count; i++) {
-            tensors[i].copy(*src_tensors[i]);
-        }
-
-        // 2. Build dispatch_args[]: tensor pointers first, then scalar values
-        for (int32_t i = 0; i < params.tensor_count; i++) {
+        for (int32_t i = 0; i < args.tensor_count(); i++) {
+            if (args.tag(i) != TensorArgType::OUTPUT) {
+                tensors[i].copy(*args.tensor(i).ptr);
+            } else {
+                tensors[i].init_from_create_info(
+                    *args.tensor(i).create_info,
+                    reinterpret_cast<void*>(reinterpret_cast<char*>(base_addr) + offsets[i]),
+                    buffer_sizes[i]
+                );
+                result.materialize_output(tensors[i]);
+            }
             tensors[i].update_start_offset();
             dispatch_args[i] = reinterpret_cast<uint64_t>(&tensors[i]);
         }
-        // Bulk-copy scalars into dispatch_args[tensor_count..], rounded up to
-        // cache-line boundary (extra bytes within the same CL cost nothing).
-        memcpy(&dispatch_args[params.tensor_count], params.scalars,
-               PTO2_ALIGN_UP(params.scalar_count * sizeof(uint64_t), 64));
+
+        memcpy(&dispatch_args[args.tensor_count()], args.scalars(),
+               PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
     }
 };
 
@@ -434,10 +416,14 @@ struct alignas(64) PTO2TaskSlotState {
     PTO2TaskDescriptor* task;
 
     // Hot-path completion fields (moved from TaskDescriptor to avoid cross-struct access)
-    uint8_t active_mask;                         // Bitmask of active subtask slots (set once)
-    std::atomic<uint8_t> subtask_done_mask;      // Each subtask sets its done bit on completion
-    uint8_t ring_id;                             // Ring layer this task belongs to (for per-ring reclamation)
-    int32_t dep_pool_mark{0};                    // Dep pool top after this task's submission (orchestrator-only, local memory)
+    uint8_t active_mask;                     // Bitmask of active subtask slots (set once)
+    std::atomic<uint8_t> subtask_done_mask;  // Deprecated: superseded by completed_subtasks
+    uint8_t ring_id;                         // Ring layer this task belongs to (for per-ring reclamation)
+    int32_t dep_pool_mark{0};                // Dep pool top after this task's submission (orchestrator-only, local memory)
+    std::atomic<int16_t> completed_subtasks{0};
+    int16_t total_required_subtasks{0};
+    int16_t block_num{1};
+    int16_t next_block_idx{0};
 };
 
 static_assert(sizeof(PTO2TaskSlotState) == 64);
