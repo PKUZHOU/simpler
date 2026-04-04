@@ -400,13 +400,23 @@ class DistributedCodeRunner:
             "--rootinfo-file", str(rootinfo_file),
             "--data-dir", str(self.artifact_dir / f"rank_{r}"),
             "--orch-file", self._orch_artifact_name(),
-            "--orch-func", self.orch_func,
         ]
 
-        phase2_cfg = dist.get("phase2", {})
-        phase2_orch_func = phase2_cfg.get("orch_func")
-        if phase2_orch_func:
-            cmd += ["--phase2-orch-func", phase2_orch_func]
+        phases = list(dist.get("phases", []))
+        if not phases:
+            phases = [{"orch_func": self.orch_func, "barrier_before": False}]
+            phase2_cfg = dist.get("phase2", {})
+            phase2_orch_func = phase2_cfg.get("orch_func")
+            if phase2_orch_func:
+                phases.append({"orch_func": phase2_orch_func, "barrier_before": True})
+        for phase in phases:
+            barrier_flag = 1 if phase.get("barrier_before", False) else 0
+            phase_args = phase.get("args") or []
+            arg_spec = ",".join(
+                f"{entry['token']}@{entry.get('kind', 'scalar')}"
+                for entry in phase_args
+            )
+            cmd += ["--phase", f"{phase['orch_func']}:{barrier_flag}:{arg_spec}"]
 
         rt_cfg = getattr(self.kcfg, "RUNTIME_CONFIG", {})
         cmd += ["--aicpu-thread-num", str(rt_cfg.get("aicpu_thread_num", 1))]
@@ -418,9 +428,11 @@ class DistributedCodeRunner:
             cmd += ["--win-sync-prefix", str(win_sync)]
 
         for buf in dist.get("buffers", []):
+            shape = [int(dim) for dim in buf.get("shape", [])]
+            shape_spec = ",".join(str(dim) for dim in shape)
             spec = (
                 f"{buf['name']}:{buf['dtype']}:{buf['count']}:"
-                f"{int(buf.get('data_prefix_elems', 0) or 0)}"
+                f"{int(buf.get('data_prefix_elems', 0) or 0)}:{shape_spec}"
             )
             if buf["placement"] == "window":
                 cmd += ["--win-buffer", spec]

@@ -44,12 +44,32 @@ def parse_buffer_spec(spec):
         result["data_prefix_elems"] = int(parts[3])
     else:
         result["data_prefix_elems"] = 0
+    if len(parts) >= 5 and parts[4]:
+        result["shape"] = [int(dim) for dim in parts[4].split(",") if dim]
+    else:
+        result["shape"] = [result["count"]]
     return result
 
 
 def parse_kernel_spec(spec):
     p = spec.index(":")
     return {"func_id": int(spec[:p]), "filename": spec[p + 1:]}
+
+
+def parse_phase_spec(spec):
+    parts = spec.split(":")
+    barrier_before = False
+    if len(parts) >= 2:
+        barrier_before = bool(int(parts[1]))
+    args = None
+    if len(parts) >= 3 and parts[2]:
+        args = []
+        for item in parts[2].split(","):
+            if not item:
+                continue
+            token, kind = item.split("@", 1)
+            args.append({"token": token, "kind": kind})
+    return {"orch_func": parts[0], "barrier_before": barrier_before, "args": args}
 
 
 def main():
@@ -62,8 +82,9 @@ def main():
     parser.add_argument("--rootinfo-file", required=True)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--orch-file", required=True)
-    parser.add_argument("--orch-func", required=True)
+    parser.add_argument("--orch-func", default=None)
     parser.add_argument("--phase2-orch-func", default=None)
+    parser.add_argument("--phase", action="append", default=[])
     parser.add_argument("--win-sync-prefix", type=int, default=0)
     parser.add_argument("--aicpu-thread-num", type=int, default=1)
     parser.add_argument("--block-dim", type=int, default=1)
@@ -90,6 +111,15 @@ def main():
         buffers.append(b)
 
     kernel_bins = [parse_kernel_spec(s) for s in args.kernel_bin]
+    phases = [parse_phase_spec(s) for s in args.phase]
+    if not phases:
+        if args.orch_func:
+            phases.append({"orch_func": args.orch_func, "barrier_before": False})
+        if args.phase2_orch_func:
+            phases.append({"orch_func": args.phase2_orch_func, "barrier_before": True})
+    if not phases:
+        sys.stderr.write(f"[rank {args.rank}] no orchestration phases configured\n")
+        return 1
 
     buf_by_name = {b["name"]: b for b in buffers}
 
@@ -111,7 +141,15 @@ def main():
         comm_init, comm_alloc_windows, comm_get_local_window_base,
         comm_barrier, comm_destroy,
     )
-    from task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, ChipWorker, CoreCallable
+    from task_interface import (
+        CallConfig,
+        ChipCallable,
+        ChipStorageTaskArgs,
+        ChipWorker,
+        ContinuousTensor,
+        CoreCallable,
+        DataType,
+    )
 
     lib_path = artifact_dir / "libhost_runtime.so"
     bind_host_binary(str(lib_path))
@@ -204,24 +242,71 @@ def main():
         data = (artifact_dir / k["filename"]).read_bytes()
         kernel_binaries.append((k["func_id"], data))
 
-    func_args = []
-    for tok in args.args:
+    dtype_map = {
+        "float32": DataType.FLOAT32,
+        "float64": DataType.FLOAT32,
+        "float16": DataType.FLOAT16,
+        "bfloat16": DataType.BFLOAT16,
+        "int8": DataType.INT8,
+        "uint8": DataType.UINT8,
+        "int16": DataType.INT16,
+        "uint16": DataType.INT16,
+        "int32": DataType.INT32,
+        "uint32": DataType.INT32,
+        "int64": DataType.INT64,
+        "uint64": DataType.UINT64,
+    }
+
+    def resolve_scalar_token(tok):
         if tok == "nranks":
-            func_args.append(args.nranks)
-        elif tok == "root":
-            func_args.append(args.root)
-        elif tok == "deviceCtx":
-            func_args.append(device_ctx_ptr)
-        else:
-            b = buf_by_name.get(tok)
-            if not b:
-                sys.stderr.write(f"[rank {args.rank}] --arg: unknown token '{tok}'\n")
-                return 1
-            func_args.append(b["dev_ptr"])
+            return args.nranks
+        if tok == "root":
+            return args.root
+        if tok == "deviceCtx":
+            return device_ctx_ptr
+        b = buf_by_name.get(tok)
+        if b is None:
+            raise KeyError(tok)
+        return b["dev_ptr"]
+
+    def build_phase_args(phase):
+        phase_args = phase.get("args")
+        if not phase_args:
+            phase_args = [{"token": tok, "kind": "scalar"} for tok in args.args]
+
+        orch_args = ChipStorageTaskArgs()
+        seen_scalar = False
+        tensor_count = 0
+        scalar_count = 0
+        for entry in phase_args:
+            token = entry["token"]
+            kind = entry.get("kind", "scalar")
+            if kind == "tensor":
+                if seen_scalar:
+                    raise ValueError(f"Tensor arg '{token}' appears after scalar args")
+                b = buf_by_name.get(token)
+                if b is None:
+                    raise KeyError(token)
+                dtype = dtype_map.get(b["dtype"])
+                if dtype is None:
+                    raise ValueError(f"Unsupported tensor dtype '{b['dtype']}' for '{token}'")
+                shape = tuple(int(dim) for dim in b.get("shape", [b["count"]]))
+                orch_args.add_tensor(ContinuousTensor.make(b["dev_ptr"], shape, dtype))
+                tensor_count += 1
+            else:
+                seen_scalar = True
+                orch_args.add_scalar(resolve_scalar_token(token))
+                scalar_count += 1
+        return orch_args, tensor_count, scalar_count
 
     def run_phase(orch_func_name: str) -> None:
+        phase = next((item for item in phases if item["orch_func"] == orch_func_name), None)
+        if phase is None:
+            raise ValueError(f"Unknown phase '{orch_func_name}'")
+        orch_args, tensor_count, scalar_count = build_phase_args(phase)
         sys.stderr.write(
-            f"[rank {args.rank}] Launching kernel phase '{orch_func_name}': {len(func_args)} args, "
+            f"[rank {args.rank}] Launching kernel phase '{orch_func_name}': "
+            f"{tensor_count} tensors, {scalar_count} scalars, "
             f"{len(kernel_binaries)} kernels\n"
         )
 
@@ -235,10 +320,6 @@ def main():
             children=core_children,
         )
 
-        orch_args = ChipStorageTaskArgs()
-        for value in func_args:
-            orch_args.add_scalar(value)
-
         worker = ChipWorker()
         worker.init(args.device_id, lib_path, aicpu_binary, aicore_binary)
 
@@ -249,10 +330,10 @@ def main():
         worker.run(chip_callable, orch_args, config)
         worker.reset()
 
-    run_phase(args.orch_func)
-    if args.phase2_orch_func:
-        comm_barrier(comm)
-        run_phase(args.phase2_orch_func)
+    for idx, phase in enumerate(phases):
+        if idx > 0 and phase.get("barrier_before", False):
+            comm_barrier(comm)
+        run_phase(phase["orch_func"])
     sys.stderr.write(f"[rank {args.rank}] Kernel execution complete\n")
 
     # ----------------------------------------------------------------
