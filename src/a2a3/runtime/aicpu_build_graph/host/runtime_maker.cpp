@@ -112,9 +112,14 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
 
     const uint8_t *orch_so_binary = static_cast<const uint8_t *>(callable->binary_data());
     size_t orch_so_size = callable->binary_size();
+    const char *orch_func_name = callable->func_name();
 
     if (orch_so_binary == nullptr || orch_so_size == 0) {
         LOG_ERROR("Orchestration SO binary is required for device orchestration");
+        return -1;
+    }
+    if (orch_func_name == nullptr || orch_func_name[0] == '\0') {
+        LOG_ERROR("Orchestration function name is required for device orchestration");
         return -1;
     }
 
@@ -179,8 +184,9 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     // Pass the HOST pointer (orch_so_binary), not the device pointer (dev_so)
     // AICPU Thread 3 will read from get_device_orch_so_data() which returns this storage
     runtime->set_device_orch_so(orch_so_binary, orch_so_size);
+    runtime->set_device_orch_func_name(orch_func_name);
     runtime->record_tensor_pair(nullptr, dev_so, orch_so_size);
-    LOG_INFO("Orchestration SO: %zu bytes copied to device", orch_so_size);
+    LOG_INFO("Orchestration SO: %zu bytes copied to device, func=%s", orch_so_size, orch_func_name);
     int64_t t_so_end = _now_ms();
 
     // Read ready queue shard count from environment for AICPU scheduler

@@ -199,7 +199,13 @@ DISTRIBUTED_CONFIG = {
     "comm_include_dirs": [...],           # Extra include dirs for kernel compilation
     "win_sync_prefix": 256,               # Bytes reserved before window buffers
     "buffers": [
-        {"name": "input",  "dtype": "float32", "count": 256, "placement": "window"},
+        {
+            "name": "input",
+            "dtype": "float32",
+            "count": 256,
+            "placement": "window",
+            "data_prefix_elems": 4,       # Optional: hide first 4 elems in backing storage
+        },
         {"name": "output", "dtype": "float32", "count": 256, "placement": "device"},
     ],
     "inputs": ["input"],                  # Buffers to load from .bin files
@@ -210,6 +216,7 @@ DISTRIBUTED_CONFIG = {
 
 - **`placement: "window"`** — Buffer is allocated in the RDMA window region (accessible by all ranks).
 - **`placement: "device"`** — Buffer is allocated via `device_malloc` (local to each rank).
+- **`data_prefix_elems`** — Optional number of leading elements reserved in the backing storage. The runtime maps the logical tensor after this prefix, so upper layers only see the real data region.
 - **`args`** — Tokens passed as orchestration function arguments. Special tokens: `nranks`, `root`, `deviceCtx` (pointer to `CommDeviceContext`).
 
 ### 4. Distributed `golden.py` Format

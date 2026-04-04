@@ -46,6 +46,7 @@
 #define RUNTIME_MAX_TENSOR_PAIRS 64
 #define RUNTIME_MAX_FUNC_ID 32
 #define RUNTIME_MAX_ORCH_SO_SIZE (4 * 1024 * 1024)  // 1MB max for orchestration SO
+#define RUNTIME_MAX_ORCH_FUNC_NAME 64
 
 // Default ready queue shards: one shard per worker thread (total minus orchestrator)
 constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 1;
@@ -197,6 +198,7 @@ private:  // NOLINT(whitespace/indent)
     // Stored as a copy to avoid lifetime issues with Python ctypes arrays
     uint8_t device_orch_so_storage_[RUNTIME_MAX_ORCH_SO_SIZE];
     size_t device_orch_so_size_;
+    char device_orch_func_name_[RUNTIME_MAX_ORCH_FUNC_NAME];
 
 public:  // NOLINT(whitespace/indent)
     /**
@@ -250,6 +252,8 @@ public:  // NOLINT(whitespace/indent)
     void set_device_orch_so(const void *data, size_t size);
     const void *get_device_orch_so_data() const;
     size_t get_device_orch_so_size() const;
+    void set_device_orch_func_name(const char *name);
+    const char *get_device_orch_func_name() const;
 
     uint64_t get_function_bin_addr(int func_id) const;
     void set_function_bin_addr(int func_id, uint64_t addr);

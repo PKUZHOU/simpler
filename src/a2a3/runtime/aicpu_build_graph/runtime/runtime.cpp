@@ -52,6 +52,7 @@ Runtime::Runtime() {
 
     // Initialize device orchestration SO binary
     device_orch_so_size_ = 0;
+    memset(device_orch_func_name_, 0, sizeof(device_orch_func_name_));
 
     // Initialize kernel binary tracking
     registered_kernel_count_ = 0;
@@ -119,6 +120,16 @@ const void *Runtime::get_device_orch_so_data() const {
 }
 
 size_t Runtime::get_device_orch_so_size() const { return device_orch_so_size_; }
+
+void Runtime::set_device_orch_func_name(const char *name) {
+    memset(device_orch_func_name_, 0, sizeof(device_orch_func_name_));
+    if (name == nullptr) {
+        return;
+    }
+    strncpy(device_orch_func_name_, name, sizeof(device_orch_func_name_) - 1);
+}
+
+const char *Runtime::get_device_orch_func_name() const { return device_orch_func_name_; }
 
 uint64_t Runtime::get_function_bin_addr(int func_id) const {
     if (func_id < 0 || func_id >= RUNTIME_MAX_FUNC_ID) return 0;

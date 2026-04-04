@@ -24,6 +24,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+import torch
+
 logger = logging.getLogger(__name__)
 
 SIMPLER_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -41,6 +44,36 @@ DTYPE_FORMAT = {
     "uint16": ("H", 2),
     "int8": ("b", 1),
     "uint8": ("B", 1),
+    "bfloat16": ("H", 2),
+}
+
+DTYPE_TORCH = {
+    "float32": torch.float32,
+    "float64": torch.float64,
+    "int32": torch.int32,
+    "int64": torch.int64,
+    "uint32": torch.int32,
+    "uint64": torch.int64,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "int16": torch.int16,
+    "uint16": torch.int16,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+}
+
+DTYPE_NUMPY = {
+    "float32": np.float32,
+    "float64": np.float64,
+    "int32": np.int32,
+    "int64": np.int64,
+    "uint32": np.uint32,
+    "uint64": np.uint64,
+    "float16": np.float16,
+    "int16": np.int16,
+    "uint16": np.uint16,
+    "int8": np.int8,
+    "uint8": np.uint8,
 }
 
 
@@ -49,6 +82,61 @@ def _load_module(path, name="mod"):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _is_tensor_like(value):
+    return isinstance(value, (torch.Tensor, np.ndarray))
+
+
+def _value_to_tensor(value, dtype: str, buffer_name: str) -> torch.Tensor:
+    target_dtype = DTYPE_TORCH.get(dtype)
+    if target_dtype is None:
+        raise ValueError(f"Unsupported dtype '{dtype}' for buffer '{buffer_name}'")
+
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+    elif isinstance(value, np.ndarray):
+        tensor = torch.from_numpy(value)
+    else:
+        tensor = torch.as_tensor(value)
+
+    if target_dtype == torch.bfloat16:
+        if tensor.dtype != torch.bfloat16:
+            tensor = tensor.to(torch.bfloat16)
+    else:
+        tensor = tensor.to(target_dtype)
+    return tensor.contiguous()
+
+
+def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    tensor = tensor.detach().cpu().contiguous()
+    return tensor.view(torch.uint8).numpy().tobytes()
+
+
+def _read_buffer_as_tensor(path: Path, dtype: str, buffer_name: str) -> torch.Tensor:
+    raw = path.read_bytes()
+    _, elem_sz = DTYPE_FORMAT.get(dtype, ("f", 4))
+    if len(raw) % elem_sz != 0:
+        raise ValueError(
+            f"Buffer '{buffer_name}' file size {len(raw)} is not aligned to element size {elem_sz}"
+        )
+    count = len(raw) // elem_sz
+
+    if dtype == "bfloat16":
+        array = np.frombuffer(raw, dtype=np.uint16, count=count).copy()
+        return torch.from_numpy(array).view(torch.bfloat16).clone()
+
+    np_dtype = DTYPE_NUMPY.get(dtype)
+    if np_dtype is None:
+        raise ValueError(f"Unsupported dtype '{dtype}' for buffer '{buffer_name}'")
+    return torch.from_numpy(np.frombuffer(raw, dtype=np_dtype, count=count).copy())
+
+
+def _tensor_to_list(tensor: torch.Tensor, dtype: str):
+    tensor = tensor.detach().cpu().view(-1)
+    if dtype == "bfloat16":
+        tensor = tensor.float()
+    return tensor.tolist()
 
 
 class DistributedCodeRunner:
@@ -265,19 +353,31 @@ class DistributedCodeRunner:
             logger.info("No golden.py or generate_distributed_inputs — skipping data prep")
             return
 
+        dist = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})
+        input_names = set(dist.get("inputs", []))
+
         for r in range(self.nranks):
             rank_dir = self.artifact_dir / f"rank_{r}"
             rank_dir.mkdir(parents=True, exist_ok=True)
 
             inputs = golden.generate_distributed_inputs(r, self.nranks, self.root)
             for name, data in inputs:
-                if isinstance(data, (list, tuple)):
-                    buf_cfg = self._get_buffer_config(name)
+                if name not in input_names:
+                    continue
+                buf_cfg = self._get_buffer_config(name)
+                if _is_tensor_like(data):
+                    tensor = _value_to_tensor(data, buf_cfg["dtype"], name)
+                    bin_data = _tensor_to_bytes(tensor)
+                elif isinstance(data, (list, tuple)):
                     fmt_char, _ = self._get_dtype_format(buf_cfg["dtype"], name)
                     bin_data = struct.pack(f"<{len(data)}{fmt_char}", *data)
-                    path = rank_dir / f"{name}.bin"
-                    path.write_bytes(bin_data)
-                    logger.debug(f"  rank_{r}/{name}.bin: {len(bin_data)} bytes")
+                else:
+                    raise TypeError(
+                        f"Unsupported distributed input type for '{name}': {type(data)}"
+                    )
+                path = rank_dir / f"{name}.bin"
+                path.write_bytes(bin_data)
+                logger.debug(f"  rank_{r}/{name}.bin: {len(bin_data)} bytes")
 
         logger.info(f"Prepared data for {self.nranks} ranks in {self.artifact_dir}")
 
@@ -303,6 +403,11 @@ class DistributedCodeRunner:
             "--orch-func", self.orch_func,
         ]
 
+        phase2_cfg = dist.get("phase2", {})
+        phase2_orch_func = phase2_cfg.get("orch_func")
+        if phase2_orch_func:
+            cmd += ["--phase2-orch-func", phase2_orch_func]
+
         rt_cfg = getattr(self.kcfg, "RUNTIME_CONFIG", {})
         cmd += ["--aicpu-thread-num", str(rt_cfg.get("aicpu_thread_num", 1))]
         cmd += ["--block-dim", str(rt_cfg.get("block_dim", 1))]
@@ -313,7 +418,10 @@ class DistributedCodeRunner:
             cmd += ["--win-sync-prefix", str(win_sync)]
 
         for buf in dist.get("buffers", []):
-            spec = f"{buf['name']}:{buf['dtype']}:{buf['count']}"
+            spec = (
+                f"{buf['name']}:{buf['dtype']}:{buf['count']}:"
+                f"{int(buf.get('data_prefix_elems', 0) or 0)}"
+            )
             if buf["placement"] == "window":
                 cmd += ["--win-buffer", spec]
             else:
@@ -412,42 +520,84 @@ class DistributedCodeRunner:
         output_names = dist.get("outputs", [])
         buf_map = {b["name"]: b for b in dist.get("buffers", [])}
 
-        # Compute expected outputs once for the distributed verification step.
-        seed_dir = self.artifact_dir / f"rank_{self.root}"
-        seed_outputs = {}
-        for name in output_names:
-            path = seed_dir / f"{name}.bin"
-            if not path.exists():
-                logger.error(f"Output file not found: {path}")
-                return False
-            raw = path.read_bytes()
-            dtype = buf_map.get(name, {}).get("dtype", "float32")
-            fmt_char, elem_sz = DTYPE_FORMAT.get(dtype, ("f", 4))
-            count = len(raw) // elem_sz
-            seed_outputs[name] = list(struct.unpack(f"<{count}{fmt_char}", raw))
-
-        expected_outputs = {n: v.copy() for n, v in seed_outputs.items()}
-        params = {"nranks": self.nranks, "root": self.root}
-        golden.compute_golden(expected_outputs, params)
-
         rtol = getattr(golden, "RTOL", 1e-5)
         atol = getattr(golden, "ATOL", 1e-5)
+        ignore_prefix = int(getattr(golden, "IGNORE_PREFIX_ELEMS", 0) or 0)
 
         all_ok = True
         for rank in range(self.nranks):
             rank_dir = self.artifact_dir / f"rank_{rank}"
+            actual_outputs = {}
             for name in output_names:
                 path = rank_dir / f"{name}.bin"
                 if not path.exists():
                     logger.error(f"Output file not found: {path}")
                     all_ok = False
                     continue
-                raw = path.read_bytes()
                 dtype = buf_map.get(name, {}).get("dtype", "float32")
-                fmt_char, elem_sz = DTYPE_FORMAT.get(dtype, ("f", 4))
-                count = len(raw) // elem_sz
-                actual = list(struct.unpack(f"<{count}{fmt_char}", raw))
-                expected = expected_outputs[name]
+                actual_outputs[name] = _read_buffer_as_tensor(path, dtype, name).view(-1)
+
+            if len(actual_outputs) != len(output_names):
+                continue
+
+            generated_items = []
+            if hasattr(golden, "generate_distributed_inputs"):
+                generated_items = list(golden.generate_distributed_inputs(rank, self.nranks, self.root))
+
+            tensor_mode = any(_is_tensor_like(data) for _, data in generated_items)
+            params = {"nranks": self.nranks, "root": self.root, "rank": rank}
+
+            if tensor_mode:
+                tensors = {}
+                for name, data in generated_items:
+                    if name not in buf_map:
+                        continue
+                    tensors[name] = _value_to_tensor(data, buf_map[name]["dtype"], name)
+                for name in output_names:
+                    if name not in tensors:
+                        tensors[name] = torch.zeros_like(actual_outputs[name])
+                golden.compute_golden(tensors, params)
+                for name in output_names:
+                    actual = actual_outputs[name]
+                    expected = tensors[name].detach().cpu().contiguous().view(-1)
+                    if ignore_prefix > 0:
+                        actual = actual[ignore_prefix:]
+                        expected = expected[ignore_prefix:]
+                    if not torch.allclose(actual.float(), expected.float(), rtol=rtol, atol=atol):
+                        mismatches = torch.nonzero(
+                            torch.abs(actual.float() - expected.float()) > atol + rtol * torch.abs(expected.float())
+                        ).view(-1)
+                        for idx in mismatches[:3].tolist():
+                            logger.error(
+                                f"  rank {rank} {name}[{idx}]: got {actual[idx].item()}, expected {expected[idx].item()}"
+                            )
+                        logger.error(
+                            f"VERIFY FAILED: rank {rank} {name} — {mismatches.numel()}/{actual.numel()} mismatches"
+                        )
+                        all_ok = False
+                    else:
+                        logger.info(f"VERIFY PASSED: rank {rank} {name} — {actual.numel()} elements correct")
+                        if rank == 0 and actual.numel() >= 5:
+                            logger.info(f"  Sample: {actual[:5].tolist()}")
+                continue
+
+            tensors = {}
+            for name, data in generated_items:
+                if name in output_names:
+                    tensors[name] = [0] * actual_outputs[name].numel()
+                else:
+                    tensors[name] = list(data) if isinstance(data, tuple) else data
+            for name in output_names:
+                tensors.setdefault(name, [0] * actual_outputs[name].numel())
+            golden.compute_golden(tensors, params)
+
+            for name in output_names:
+                dtype = buf_map.get(name, {}).get("dtype", "float32")
+                actual = _tensor_to_list(actual_outputs[name], dtype)
+                expected = tensors[name]
+                if ignore_prefix > 0:
+                    actual = actual[ignore_prefix:]
+                    expected = expected[ignore_prefix:]
 
                 mismatches = 0
                 for i, (a, e) in enumerate(zip(actual, expected)):

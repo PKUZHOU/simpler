@@ -1663,26 +1663,31 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 }
                 DEV_INFO("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
 
+                const char *orch_symbol_name = runtime->get_device_orch_func_name();
+                if (orch_symbol_name == nullptr || orch_symbol_name[0] == '\0') {
+                    orch_symbol_name = "aicpu_orchestration_entry";
+                }
+
                 dlerror();
                 auto config_func =
                     reinterpret_cast<DeviceOrchestrationConfigFunc>(dlsym(handle, "aicpu_orchestration_config"));
 
                 dlerror();
-                DeviceOrchestrationFunc orch_func =
-                    reinterpret_cast<DeviceOrchestrationFunc>(dlsym(handle, "aicpu_orchestration_entry"));
+                DeviceOrchestrationFunc orch_func = reinterpret_cast<DeviceOrchestrationFunc>(dlsym(handle, orch_symbol_name));
                 const char *dlsym_error = dlerror();
                 if (dlsym_error != nullptr) {
-                    DEV_ERROR("Thread %d: dlsym failed: %s", thread_idx, dlsym_error);
+                    DEV_ERROR("Thread %d: dlsym failed for '%s': %s", thread_idx, orch_symbol_name, dlsym_error);
                     dlclose(handle);
                     unlink(so_path);
                     return -1;
                 }
                 if (orch_func == nullptr) {
-                    DEV_ERROR("Thread %d: dlsym returned NULL for aicpu_orchestration_entry", thread_idx);
+                    DEV_ERROR("Thread %d: dlsym returned NULL for '%s'", thread_idx, orch_symbol_name);
                     dlclose(handle);
                     unlink(so_path);
                     return -1;
                 }
+                DEV_INFO("Thread %d: Loaded orchestration function '%s'", thread_idx, orch_symbol_name);
 
                 const ChipStorageTaskArgs &args = runtime->get_orch_args();
                 int32_t arg_count = args.tensor_count() + args.scalar_count();
@@ -1810,8 +1815,10 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             // Call orchestration function wrapped in an outer scope
             DEV_ALWAYS(
-                "Thread %d: Calling aicpu_orchestration_entry from SO (orch_idx=%d/(0~%d))", thread_idx, orch_idx,
-                orch_thread_num_ - 1
+                "Thread %d: Calling orchestration '%s' from SO (orch_idx=%d/(0~%d))", thread_idx,
+                runtime->get_device_orch_func_name()[0] != '\0' ? runtime->get_device_orch_func_name()
+                                                                 : "aicpu_orchestration_entry",
+                orch_idx, orch_thread_num_ - 1
             );
 #if PTO2_PROFILING
             uint64_t orch_cycle_start = get_sys_cnt_aicpu();

@@ -33,12 +33,18 @@ DTYPE_FORMAT = {
     "uint16": ("H", 2),
     "int8": ("b", 1),
     "uint8": ("B", 1),
+    "bfloat16": ("H", 2),
 }
 
 
 def parse_buffer_spec(spec):
     parts = spec.split(":")
-    return {"name": parts[0], "dtype": parts[1], "count": int(parts[2])}
+    result = {"name": parts[0], "dtype": parts[1], "count": int(parts[2])}
+    if len(parts) >= 4:
+        result["data_prefix_elems"] = int(parts[3])
+    else:
+        result["data_prefix_elems"] = 0
+    return result
 
 
 def parse_kernel_spec(spec):
@@ -57,6 +63,7 @@ def main():
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--orch-file", required=True)
     parser.add_argument("--orch-func", required=True)
+    parser.add_argument("--phase2-orch-func", default=None)
     parser.add_argument("--win-sync-prefix", type=int, default=0)
     parser.add_argument("--aicpu-thread-num", type=int, default=1)
     parser.add_argument("--block-dim", type=int, default=1)
@@ -89,6 +96,9 @@ def main():
     def elem_size(dtype):
         return DTYPE_FORMAT.get(dtype, ("f", 4))[1]
 
+    def buf_prefix_bytes(b):
+        return b.get("data_prefix_elems", 0) * elem_size(b["dtype"])
+
     def buf_bytes(b):
         return b["count"] * elem_size(b["dtype"])
 
@@ -115,7 +125,7 @@ def main():
     total_win = args.win_sync_prefix
     for b in buffers:
         if b["placement"] == "window":
-            total_win += buf_bytes(b)
+            total_win += buf_prefix_bytes(b) + buf_bytes(b)
 
     device_ctx_ptr = comm_alloc_windows(comm, total_win)
     local_base = comm_get_local_window_base(comm)
@@ -125,6 +135,13 @@ def main():
     set_device(args.device_id)
     sys.stderr.write(f"[rank {args.rank}] Device {args.device_id} set for runtime\n")
 
+    if args.win_sync_prefix > 0:
+        import ctypes
+
+        zero_bytes = bytes(args.win_sync_prefix)
+        zero_buf = (ctypes.c_uint8 * len(zero_bytes)).from_buffer_copy(zero_bytes)
+        copy_to_device(local_base, ctypes.addressof(zero_buf), len(zero_bytes))
+
     # ----------------------------------------------------------------
     # 3. Allocate buffers
     # ----------------------------------------------------------------
@@ -132,18 +149,22 @@ def main():
 
     for b in buffers:
         nbytes = buf_bytes(b)
+        prefix_bytes = buf_prefix_bytes(b)
         if b["placement"] == "window":
+            win_offset += prefix_bytes
             b["dev_ptr"] = local_base + win_offset
             win_offset += nbytes
         else:
-            ptr = device_malloc(nbytes)
+            ptr = device_malloc(prefix_bytes + nbytes)
             if not ptr:
                 sys.stderr.write(f"[rank {args.rank}] device_malloc failed for '{b['name']}'\n")
                 return 3
-            b["dev_ptr"] = ptr
+            b["alloc_ptr"] = ptr
+            b["dev_ptr"] = ptr + prefix_bytes
         sys.stderr.write(
             f"[rank {args.rank}] Buffer '{b['name']}': {b['placement']} "
-            f"{b['count']}x{b['dtype']}={nbytes}B @ 0x{b['dev_ptr']:x}\n"
+            f"{b['count']}x{b['dtype']}={nbytes}B"
+            f" prefix={prefix_bytes}B @ 0x{b['dev_ptr']:x}\n"
         )
 
     # ----------------------------------------------------------------
@@ -198,34 +219,40 @@ def main():
                 return 1
             func_args.append(b["dev_ptr"])
 
-    sys.stderr.write(
-        f"[rank {args.rank}] Launching kernel: {len(func_args)} args, "
-        f"{len(kernel_binaries)} kernels\n"
-    )
+    def run_phase(orch_func_name: str) -> None:
+        sys.stderr.write(
+            f"[rank {args.rank}] Launching kernel phase '{orch_func_name}': {len(func_args)} args, "
+            f"{len(kernel_binaries)} kernels\n"
+        )
 
-    core_children = []
-    for func_id, binary in kernel_binaries:
-        core_children.append((func_id, CoreCallable.build(signature=[], binary=binary)))
-    chip_callable = ChipCallable.build(
-        signature=[],
-        func_name=args.orch_func,
-        binary=orch_binary,
-        children=core_children,
-    )
+        core_children = []
+        for func_id, binary in kernel_binaries:
+            core_children.append((func_id, CoreCallable.build(signature=[], binary=binary)))
+        chip_callable = ChipCallable.build(
+            signature=[],
+            func_name=orch_func_name,
+            binary=orch_binary,
+            children=core_children,
+        )
 
-    orch_args = ChipStorageTaskArgs()
-    for value in func_args:
-        orch_args.add_scalar(value)
+        orch_args = ChipStorageTaskArgs()
+        for value in func_args:
+            orch_args.add_scalar(value)
 
-    worker = ChipWorker()
-    worker.init(args.device_id, lib_path, aicpu_binary, aicore_binary)
+        worker = ChipWorker()
+        worker.init(args.device_id, lib_path, aicpu_binary, aicore_binary)
 
-    config = CallConfig()
-    config.block_dim = args.block_dim
-    config.aicpu_thread_num = args.aicpu_thread_num
-    config.orch_thread_num = args.orch_thread_num
-    worker.run(chip_callable, orch_args, config)
-    worker.reset()
+        config = CallConfig()
+        config.block_dim = args.block_dim
+        config.aicpu_thread_num = args.aicpu_thread_num
+        config.orch_thread_num = args.orch_thread_num
+        worker.run(chip_callable, orch_args, config)
+        worker.reset()
+
+    run_phase(args.orch_func)
+    if args.phase2_orch_func:
+        comm_barrier(comm)
+        run_phase(args.phase2_orch_func)
     sys.stderr.write(f"[rank {args.rank}] Kernel execution complete\n")
 
     # ----------------------------------------------------------------
@@ -251,8 +278,8 @@ def main():
     # 8. Cleanup
     # ----------------------------------------------------------------
     for b in buffers:
-        if b["placement"] == "device" and b.get("dev_ptr"):
-            device_free(b["dev_ptr"])
+        if b["placement"] == "device" and b.get("alloc_ptr"):
+            device_free(b["alloc_ptr"])
 
     comm_destroy(comm)
     sys.stderr.write(f"[rank {args.rank}] Done\n")
